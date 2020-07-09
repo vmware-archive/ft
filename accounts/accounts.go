@@ -1,14 +1,14 @@
 package accounts
 
+type Sample struct {
+	Container Container
+	Workloads []Workload
+}
+
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . Accountant
 
 type Accountant interface {
 	Account([]Container) ([]Sample, error)
-}
-
-type Sample struct {
-	Container Container
-	Workloads []Workload
 }
 
 type Container struct {
@@ -19,8 +19,14 @@ type Container struct {
 type Stats struct {
 }
 
+// a Workload is a description of a concourse core concept that corresponds to
+// a container. i.e. team/pipeline/job/build/step or team/pipeline/resource.
+// Roughly speaking this is what the fly hijack codebase refers to as a
+// container fingerprint
+// = a reason for a container's existence.
+
 type Workload interface {
-	toString() string
+	ToString() string
 }
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . Worker
