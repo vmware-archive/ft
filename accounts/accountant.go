@@ -27,6 +27,7 @@ func (da *DBAccountant) Account(containers []Container) ([]Sample, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer dbConn.Close()
 
 	rows, err := sq.StatementBuilder.
 		PlaceholderFormat(sq.Dollar).
