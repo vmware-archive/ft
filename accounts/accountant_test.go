@@ -9,7 +9,6 @@ import (
 
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/garden/gardenfakes"
-	"code.cloudfoundry.org/lager/lagerctx"
 	"code.cloudfoundry.org/lager/lagertest"
 	"github.com/concourse/baggageclaim"
 	"github.com/concourse/baggageclaim/baggageclaimfakes"
@@ -34,7 +33,7 @@ import (
 	"github.com/tedsuo/ifrit"
 )
 
-var _ = FDescribe("DBAccountant", func() {
+var _ = Describe("DBAccountant", func() {
 	var (
 		postgresRunner postgresrunner.Runner
 		dbProcess      ifrit.Process
@@ -54,7 +53,11 @@ var _ = FDescribe("DBAccountant", func() {
 		postgresRunner.CreateTestDB()
 		dbConn = postgresRunner.OpenConn()
 		lockConn = postgresRunner.OpenSingleton()
-		lockFactory = lock.NewLockFactory(lockConn, metric.LogLockAcquired, metric.LogLockReleased)
+		lockFactory = lock.NewLockFactory(
+			lockConn,
+			metric.LogLockAcquired,
+			metric.LogLockReleased,
+		)
 		teamFactory = db.NewTeamFactory(dbConn, lockFactory)
 		workerFactory = db.NewWorkerFactory(dbConn)
 		team, _ = teamFactory.CreateDefaultTeamIfNotExists()
@@ -179,7 +182,7 @@ var _ = FDescribe("DBAccountant", func() {
 			1*time.Hour,
 			10*time.Second,
 			1*time.Minute,
-		).Run(lagerctx.NewContext(context.Background(), logger))
+		).Run(context.TODO())
 		// run the checks
 		lidar.NewChecker(
 			logger,
@@ -190,7 +193,7 @@ var _ = FDescribe("DBAccountant", func() {
 				ResourceCheckingInterval: 10 * time.Second,
 				CheckableCounter:         db.NewCheckableCounter(dbConn),
 			},
-		).Run(lagerctx.NewContext(context.Background(), logger))
+		).Run(context.TODO())
 	}
 
 	It("accounts for resource check containers", func() {
@@ -224,8 +227,8 @@ var _ = FDescribe("DBAccountant", func() {
 			Database: "testdb",
 			SSLMode:  "disable",
 		})
-		containers := []accounts.Container{}
 		Eventually(team.Containers).ShouldNot(BeEmpty())
+		containers := []accounts.Container{}
 		dbContainers, _ := team.Containers()
 		for _, container := range dbContainers {
 			containers = append(containers, accounts.Container{Handle: container.Handle()})

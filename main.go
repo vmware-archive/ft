@@ -1,8 +1,14 @@
 package main
 
 import (
-	"github.com/concourse/workloads/accounts"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/concourse/concourse/fly/ui"
 	"github.com/concourse/flag"
+	"github.com/concourse/workloads/accounts"
+	"github.com/fatih/color"
 	flags "github.com/jessevdk/go-flags"
 )
 
@@ -13,9 +19,42 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// TODO connect to a real worker
-	var worker accounts.Worker = nil
+	worker := accounts.NewLANWorker()
 	accountant := accounts.NewDBAccountant(postgresConfig)
-	accounts.Account(worker, accountant)
-	// print the samples
+	samples, err := accounts.Account(worker, accountant)
+	if err != nil {
+		panic(err)
+	}
+	err = printSamples(os.Stdout, samples)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func printSamples(writer io.Writer, samples []accounts.Sample) error {
+	data := []ui.TableRow{}
+	for _, sample := range samples {
+		workloads := []string{}
+		for _, w := range sample.Workloads {
+			workloads = append(workloads, w.ToString())
+		}
+		data = append(data, ui.TableRow{
+			ui.TableCell{Contents: sample.Container.Handle},
+			ui.TableCell{Contents: strings.Join(workloads, ",")},
+		})
+	}
+	table := ui.Table{
+		Headers: ui.TableRow{
+			ui.TableCell{
+				Contents: "handle",
+				Color:    color.New(color.Bold),
+			},
+			ui.TableCell{
+				Contents: "workloads",
+				Color:    color.New(color.Bold),
+			},
+		},
+		Data: data,
+	}
+	return table.Render(writer, true)
 }

@@ -18,6 +18,7 @@ require (
 	github.com/concourse/retryhttp v1.0.2
 	github.com/cppforlife/go-patch v0.2.0 // indirect
 	github.com/cppforlife/go-semi-semantic v0.0.0-20160921010311-576b6af77ae4
+	github.com/fatih/color v1.7.0
 	github.com/influxdata/influxdb v1.8.1 // indirect
 	github.com/jessevdk/go-flags v1.4.0
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.2.3
