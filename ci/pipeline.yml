@@ -1,0 +1,50 @@
+resource_types:
+- name: apt-package
+  type: registry-image
+  source: {repository: brennerm/apt-repo-resource}
+resources:
+- name: repo
+  type: git
+  icon: github
+  source:
+    uri: https://github.com/jamieklassen/workloads
+- name: postgresql-11-bionic
+  type: apt-package
+  icon: package-variant
+  source:
+    repositories:
+    - deb http://apt.postgresql.org/pub/repos/apt bionic-pgdg main
+    package: postgresql-11
+- name: image
+  type: registry-image
+  icon: docker
+  source:
+    repository: registry:5000/image
+    # insecure_registries: ["registry:5000"]
+jobs:
+- name: image
+  plan:
+  - get: postgresql-11-bionic
+    params: {download_deb: true}
+    trigger: true
+  - get: repo
+  - task: build
+    privileged: true
+    file: repo/ci/image.yml
+  - put: image
+    params: {image: built-image/image.tar}
+- name: test
+  plan:
+  - get: repo
+    trigger: true
+  - get: image
+  - task: test
+    image: image
+    config:
+      platform: linux
+      inputs:
+      - name: repo
+      run:
+        path: go
+        args: ["test", "./..."]
+        dir: repo
