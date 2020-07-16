@@ -3,8 +3,9 @@ package accounts_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
-	"os"
+	"strconv"
 	"time"
 
 	"code.cloudfoundry.org/garden"
@@ -21,7 +22,6 @@ import (
 	"github.com/concourse/concourse/atc/engine/builder"
 	"github.com/concourse/concourse/atc/lidar"
 	"github.com/concourse/concourse/atc/metric"
-	"github.com/concourse/concourse/atc/postgresrunner"
 	"github.com/concourse/concourse/atc/resource"
 	"github.com/concourse/concourse/atc/worker"
 	"github.com/concourse/concourse/atc/worker/gclient"
@@ -30,29 +30,57 @@ import (
 	"github.com/concourse/workloads/accounts"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/tedsuo/ifrit"
 )
 
 var _ = Describe("DBAccountant", func() {
 	var (
-		postgresRunner postgresrunner.Runner
-		dbProcess      ifrit.Process
-		dbConn         db.Conn
-		lockConn       *sql.DB
-		lockFactory    lock.LockFactory
-		teamFactory    db.TeamFactory
-		workerFactory  db.WorkerFactory
-		team           db.Team
+		dbConn        db.Conn
+		lockConn      *sql.DB
+		lockFactory   lock.LockFactory
+		teamFactory   db.TeamFactory
+		workerFactory db.WorkerFactory
+		team          db.Team
 	)
 
+	testDBName := func() string {
+		return "testdb" + strconv.Itoa(GinkgoParallelNode())
+	}
+
+	dropTestDB := func() {
+		conn, err := sql.Open("postgres", "host=127.0.0.1 user=postgres sslmode=disable port=5432")
+		defer conn.Close()
+		Expect(err).NotTo(HaveOccurred())
+		conn.Exec("DROP DATABASE " + testDBName())
+	}
+
+	createTestDB := func() bool {
+		conn, err := sql.Open("postgres", "host=127.0.0.1 user=postgres sslmode=disable port=5432")
+		defer conn.Close()
+		Expect(err).NotTo(HaveOccurred())
+		_, err = conn.Exec("CREATE DATABASE " + testDBName())
+		return err == nil
+	}
+
 	BeforeEach(func() {
-		postgresRunner = postgresrunner.Runner{
-			Port: 5433 + GinkgoParallelNode(),
+		if !createTestDB() {
+			dropTestDB()
+			Expect(createTestDB()).To(BeTrue())
 		}
-		dbProcess = ifrit.Invoke(postgresRunner)
-		postgresRunner.CreateTestDB()
-		dbConn = postgresRunner.OpenConn()
-		lockConn = postgresRunner.OpenSingleton()
+
+		datasourceName := fmt.Sprintf("host=127.0.0.1 user=postgres dbname=%s sslmode=disable port=5432", testDBName())
+		var err error
+		dbConn, err = db.Open(
+			lagertest.NewTestLogger("postgres"),
+			"postgres",
+			datasourceName,
+			nil,
+			nil,
+			"postgresrunner",
+			nil,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		lockConn, err = sql.Open("postgres", datasourceName)
+		Expect(err).NotTo(HaveOccurred())
 		lockFactory = lock.NewLockFactory(
 			lockConn,
 			metric.LogLockAcquired,
@@ -66,11 +94,7 @@ var _ = Describe("DBAccountant", func() {
 	AfterEach(func() {
 		dbConn.Close()
 		lockConn.Close()
-		postgresRunner.DropTestDB()
-
-		dbProcess.Signal(os.Interrupt)
-		err := <-dbProcess.Wait()
-		Expect(err).NotTo(HaveOccurred())
+		dropTestDB()
 	})
 
 	registerWorker := func(w atc.Worker) {
@@ -222,9 +246,9 @@ var _ = Describe("DBAccountant", func() {
 		checkResources()
 		accountant := accounts.NewDBAccountant(flag.PostgresConfig{
 			Host:     "127.0.0.1",
-			Port:     5433 + uint16(GinkgoParallelNode()),
+			Port:     5432,
 			User:     "postgres",
-			Database: "testdb",
+			Database: testDBName(),
 			SSLMode:  "disable",
 		})
 		Eventually(team.Containers).ShouldNot(BeEmpty())
