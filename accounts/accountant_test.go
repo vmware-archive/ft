@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"time"
 
@@ -46,15 +47,29 @@ var _ = Describe("DBAccountant", func() {
 		return "testdb" + strconv.Itoa(GinkgoParallelNode())
 	}
 
+	dbHost := func() string {
+		if val, exists := os.LookupEnv("DB_HOST"); exists {
+			return val
+		}
+		return "127.0.0.1"
+	}
+
+	dataSource := func() string {
+		return fmt.Sprintf(
+			"host=%s user=postgres sslmode=disable port=5432",
+			dbHost(),
+		)
+	}
+
 	dropTestDB := func() {
-		conn, err := sql.Open("postgres", "host=127.0.0.1 user=postgres sslmode=disable port=5432")
+		conn, err := sql.Open("postgres", dataSource())
 		defer conn.Close()
 		Expect(err).NotTo(HaveOccurred())
 		conn.Exec("DROP DATABASE " + testDBName())
 	}
 
 	createTestDB := func() bool {
-		conn, err := sql.Open("postgres", "host=127.0.0.1 user=postgres sslmode=disable port=5432")
+		conn, err := sql.Open("postgres", dataSource())
 		defer conn.Close()
 		Expect(err).NotTo(HaveOccurred())
 		_, err = conn.Exec("CREATE DATABASE " + testDBName())
@@ -67,7 +82,7 @@ var _ = Describe("DBAccountant", func() {
 			Expect(createTestDB()).To(BeTrue())
 		}
 
-		datasourceName := fmt.Sprintf("host=127.0.0.1 user=postgres dbname=%s sslmode=disable port=5432", testDBName())
+		datasourceName := fmt.Sprintf("host=%s user=postgres dbname=%s sslmode=disable port=5432", dbHost(), testDBName())
 		var err error
 		dbConn, err = db.Open(
 			lagertest.NewTestLogger("postgres"),
