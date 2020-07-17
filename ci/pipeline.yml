@@ -7,7 +7,9 @@ resources:
   type: git
   icon: github
   source:
-    uri: https://github.com/concourse/ctop
+    uri: git@github.com:concourse/ctop.git
+    branch: master
+    private_key: ((deploy_key))
 - name: postgres-11
   type: registry-image
   icon: elephant
@@ -28,6 +30,13 @@ resources:
     username: ((basic_auth.username))
     password: ((basic_auth.password))
     concourse_url: https://ci.concourse-ci.org
+- name: release
+  type: github-release
+  icon: package-variant-closed
+  source:
+    owner: concourse
+    repository: ctop
+    access_token: ((concourse_github_release.access_token))
 jobs:
 - name: test
   plan:
@@ -45,3 +54,49 @@ jobs:
     params:
       mode: normal
       alert_type: failed
+- name: publish
+  plan:
+  - get: repo
+    passed: [test]
+  - get: go-1.14
+    passed: [test]
+  - task: tag
+    config:
+      platform: linux
+      image_resource:
+        type: registry-image
+        source: {repository: busybox}
+      outputs:
+      - name: tag
+      run:
+        path: sh
+        args:
+        - -c
+        - |
+          echo "v0.0.0-$(date +%s)" > tag/file
+  - put: repo
+    params:
+      repository: repo
+      tag: tag/file
+  - task: build
+    image: go-1.14
+    config:
+      platform: linux
+      inputs:
+      - name: repo
+      outputs:
+      - name: build
+      run:
+        path: sh
+        dir: repo
+        args:
+        - -c
+        - |
+          for platform in linux darwin windows; do
+            GOOS=$platform go build -o ../build/ctop-$platform
+          done
+  - put: release
+    params:
+      name: tag/file
+      tag: tag/file
+      globs: ["build/ctop-*"]
