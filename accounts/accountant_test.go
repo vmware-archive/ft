@@ -28,7 +28,7 @@ import (
 	"github.com/concourse/concourse/atc/worker/gclient"
 	"github.com/concourse/concourse/atc/worker/gclient/gclientfakes"
 	"github.com/concourse/flag"
-	"github.com/concourse/workloads/accounts"
+	"github.com/concourse/ctop/accounts"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )

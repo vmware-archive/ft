@@ -7,7 +7,7 @@ import (
 	"code.cloudfoundry.org/garden/gardenfakes"
 	"code.cloudfoundry.org/garden/server"
 	"code.cloudfoundry.org/lager/lagertest"
-	"github.com/concourse/workloads/accounts"
+	"github.com/concourse/ctop/accounts"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gstruct"

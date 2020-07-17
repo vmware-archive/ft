@@ -7,7 +7,7 @@ import (
 
 	"github.com/concourse/concourse/fly/ui"
 	"github.com/concourse/flag"
-	"github.com/concourse/workloads/accounts"
+	"github.com/concourse/ctop/accounts"
 	"github.com/fatih/color"
 	flags "github.com/jessevdk/go-flags"
 )
