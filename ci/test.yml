@@ -6,6 +6,8 @@ inputs:
 - name: postgres-11
 - name: go-1.14
 - name: repo
+caches:
+- path: go-module-cache
 run:
   path: bash
   args:
@@ -13,11 +15,12 @@ run:
   - |
     source /docker-lib.sh
     start_docker
-    docker load -i postgres-11/image.tar
-    docker load -i go-1.14/image.tar
+    echo "Loading postgres:11-alpine..." && docker load -i postgres-11/image.tar
+    echo "Loading golang:1.14..." && docker load -i go-1.14/image.tar
     docker-compose \
       -f repo/docker-compose.yml \
       run \
       -v $PWD/repo:/src \
+      -v $PWD/go-module-cache:/root/go/pkg/mod \
       -w /src \
       tests go test ./...
