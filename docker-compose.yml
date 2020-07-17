@@ -1,0 +1,12 @@
+version: '3'
+services:
+  db:
+    image: postgres:11-alpine
+    environment:
+      POSTGRES_PASSWORD: password
+  tests:
+    depends_on: [db]
+    image: golang:1.14
+    environment:
+      DB_HOST: db
+      DB_PASSWORD: password

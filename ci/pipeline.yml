@@ -3,7 +3,7 @@ resources:
   type: git
   icon: github
   source:
-    uri: https://github.com/jamieklassen/workloads
+    uri: https://github.com/concourse/ctop
 - name: postgres-11
   type: registry-image
   icon: elephant
@@ -27,33 +27,4 @@ jobs:
     params: {format: oci}
   - task: test
     privileged: true
-    config:
-      platform: linux
-      image_resource:
-        type: registry-image
-        source: {repository: amidos/dcind}
-      inputs:
-      - name: postgres-11
-      - name: go-1.14
-      - name: repo
-      run:
-        path: bash
-        args:
-        - -exc
-        - |
-          source /docker-lib.sh
-          start_docker
-          docker load -i postgres-11/image.tar
-          docker load -i go-1.14/image.tar
-          docker-compose -f <(cat <<EOF
-          version: '3'
-          services:
-            db:
-              image: postgres:11-alpine
-            tests:
-              depends_on: [db]
-              image: golang:1.14
-              environment:
-                DB_HOST: db
-          EOF
-          ) run -v $PWD/repo:/src -w /src tests go test ./...
+    file: repo/ci/test.yml

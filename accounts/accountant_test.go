@@ -56,33 +56,34 @@ var _ = Describe("DBAccountant", func() {
 
 	dataSource := func() string {
 		return fmt.Sprintf(
-			"host=%s user=postgres sslmode=disable port=5432",
+			"host=%s user=postgres password=password sslmode=disable port=5432",
 			dbHost(),
 		)
 	}
 
-	dropTestDB := func() {
+	dropTestDB := func() error {
 		conn, err := sql.Open("postgres", dataSource())
 		defer conn.Close()
 		Expect(err).NotTo(HaveOccurred())
-		conn.Exec("DROP DATABASE " + testDBName())
+		_, err = conn.Exec("DROP DATABASE " + testDBName())
+		return err
 	}
 
-	createTestDB := func() bool {
+	createTestDB := func() error {
 		conn, err := sql.Open("postgres", dataSource())
 		defer conn.Close()
 		Expect(err).NotTo(HaveOccurred())
 		_, err = conn.Exec("CREATE DATABASE " + testDBName())
-		return err == nil
+		return err
 	}
 
 	BeforeEach(func() {
-		if !createTestDB() {
-			dropTestDB()
-			Expect(createTestDB()).To(BeTrue())
+		if createTestDB() != nil {
+			Expect(dropTestDB()).To(Succeed())
+			Expect(createTestDB()).To(Succeed())
 		}
 
-		datasourceName := fmt.Sprintf("host=%s user=postgres dbname=%s sslmode=disable port=5432", dbHost(), testDBName())
+		datasourceName := fmt.Sprintf("host=%s user=postgres password=password dbname=%s sslmode=disable port=5432", dbHost(), testDBName())
 		var err error
 		dbConn, err = db.Open(
 			lagertest.NewTestLogger("postgres"),
@@ -260,9 +261,10 @@ var _ = Describe("DBAccountant", func() {
 		createResources(resources)
 		checkResources()
 		accountant := accounts.NewDBAccountant(flag.PostgresConfig{
-			Host:     "127.0.0.1",
+			Host:     dbHost(),
 			Port:     5432,
 			User:     "postgres",
+			Password: "password",
 			Database: testDBName(),
 			SSLMode:  "disable",
 		})

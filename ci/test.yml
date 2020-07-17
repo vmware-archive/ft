@@ -1,0 +1,23 @@
+platform: linux
+image_resource:
+  type: registry-image
+  source: {repository: amidos/dcind}
+inputs:
+- name: postgres-11
+- name: go-1.14
+- name: repo
+run:
+  path: bash
+  args:
+  - -ec
+  - |
+    source /docker-lib.sh
+    start_docker
+    docker load -i postgres-11/image.tar
+    docker load -i go-1.14/image.tar
+    docker-compose \
+      -f repo/docker-compose.yml \
+      run \
+      -v $PWD/repo:/src \
+      -w /src \
+      tests go test ./...

@@ -1,4 +1,4 @@
-module github.com/concourse/workloads
+module github.com/concourse/ctop
 
 go 1.14
 
