@@ -7,7 +7,7 @@ inputs:
 - name: go-1.14
 - name: repo
 caches:
-- path: go-module-cache
+- path: go-cache
 run:
   path: bash
   args:
@@ -20,7 +20,8 @@ run:
     docker-compose \
       -f repo/docker-compose.yml \
       run \
+      -v $PWD/go-cache:/go-cache \
+      -e GOCACHE=/go-cache \
       -v $PWD/repo:/src \
-      -v $PWD/go-module-cache:/root/go/pkg/mod \
       -w /src \
       tests go test ./...
