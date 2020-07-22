@@ -1,85 +1,26 @@
-* one binary that does it all - speaks kubernetes and talks to the worker, also speaks postgres and talks to the database and gives the whole container accounting story
-* two binaries - one speaks postgres, the other 
+# ~ctop~ concourse container accounting tool for operators
 
-prometheus exporter or operator CLI?
-bosh release - http API? -- run on a different port
+## worker
 
-fly containers --workloads/--details/--pipelines
+* over LAN
+* deployed via bosh
+* deployed on k8s
 
-1. upload a binary to the worker, run it and capture stdout
-1. port-forward to the worker and run the binary locally
+## database
 
-# port-forwarding smart version
+* over LAN
+* proxying through webs on bosh
+* proxying through webs on k8s
 
-workeradapter - bosh ssh --opts "-L 7777:localhost:7777"/k8s port-forward <ns> <pod> 7777
+## stats
 
-workloads [--bosh-worker <deployment/vm>|--k8s-worker <ns/pod>|--lan-worker <address>] --postgres-config ...
+* container handles
+* open files
+* cpu shares
+* memmory
 
-bosh or kubectl cli must be installed and auth is handled out-of-band
+## views
 
-reuse postgres flags fron github.com/concourse/flag
-
-print data to stdout
-
-docker-compose up -d
-workloads --lan-worker localhost:7777
-abd123 - team/pipeline/resource, other-team/other-pipeline/other-resource
-aed892 - team/pipeline/job/build/name/step
-ad0732 - N/A
-
-```
-type Worker
-    = Bosh Deployment VMID
-    | K8s Namespace PodName
-    | LAN Address
-
-type Workload
-    = Check Team Pipeline Resource
-    | Build Team Pipeline Job Build Step
-```
-
-```
-type Worker interface {
-	Containers(*StatsOption...) ([]Container, error)
-}
-
-type Container struct {
-	Handle string
-	Stats
-}
-
-type Sample struct {
-	Container Container
-	Workloads []Workload
-}
-
-type Account []Sample
-
-type Accountant interface {
-	Account([]Container) (Account, error)
-}
-
-type Workload interface {
-	toString() string
-}
-
-dbResourceAccountant -> dbResourceWorkload
-dbBuildAccountant -> dbBuildWorkload
-
-func Samples(w Worker, a Accountant) (Account, error) {
-	a.Account(w.Containers())
-}
-
-func main() {
-	var w Worker
-	var a Accountant
-	// parse flags
-	account := accounts.Account(w,s)
-	fmt.Println(account)
-}
-```
-
-how to account for a container?
--> how to account for a check container?
--> how to find the resource config check session for a container?
-
+* by pipeline
+* by team
+* prometheus exporter
