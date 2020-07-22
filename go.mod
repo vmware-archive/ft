@@ -25,6 +25,7 @@ require (
 	github.com/onsi/ginkgo v1.13.0
 	github.com/onsi/gomega v1.10.1
 	github.com/papertrail/remote_syslog2 v0.0.0-20190614180052-09062fc2b02a // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/tedsuo/ifrit v0.0.0-20180802180643-bea94bb476cc
 	gopkg.in/cheggaaa/pb.v1 v1.0.28 // indirect
 )

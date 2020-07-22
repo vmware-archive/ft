@@ -11,10 +11,12 @@ import (
 
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/garden/gardenfakes"
+	"code.cloudfoundry.org/lager/lagerctx"
 	"code.cloudfoundry.org/lager/lagertest"
 	"github.com/concourse/baggageclaim"
 	"github.com/concourse/baggageclaim/baggageclaimfakes"
 	"github.com/concourse/concourse/atc"
+	"github.com/concourse/concourse/atc/builds"
 	"github.com/concourse/concourse/atc/compression"
 	"github.com/concourse/concourse/atc/creds/credsfakes"
 	"github.com/concourse/concourse/atc/db"
@@ -24,13 +26,16 @@ import (
 	"github.com/concourse/concourse/atc/lidar"
 	"github.com/concourse/concourse/atc/metric"
 	"github.com/concourse/concourse/atc/resource"
+	"github.com/concourse/concourse/atc/scheduler"
+	"github.com/concourse/concourse/atc/scheduler/algorithm"
 	"github.com/concourse/concourse/atc/worker"
 	"github.com/concourse/concourse/atc/worker/gclient"
 	"github.com/concourse/concourse/atc/worker/gclient/gclientfakes"
-	"github.com/concourse/flag"
 	"github.com/concourse/ctop/accounts"
+	"github.com/concourse/flag"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	gocache "github.com/patrickmn/go-cache"
 )
 
 var _ = Describe("DBAccountant", func() {
@@ -113,8 +118,15 @@ var _ = Describe("DBAccountant", func() {
 		dropTestDB()
 	})
 
-	registerWorker := func(w atc.Worker) {
-		workerFactory.SaveWorker(w, 10*time.Second)
+	registerWorker := func() {
+		workerFactory.SaveWorker(atc.Worker{
+			Platform: "linux",
+			Version:  "0.0.0-dev",
+			Name:     "worker",
+			ResourceTypes: []atc.WorkerResourceType{{
+				Type: "git",
+			}},
+		}, 10*time.Second)
 	}
 
 	createResources := func(rs atc.ResourceConfigs) {
@@ -239,13 +251,7 @@ var _ = Describe("DBAccountant", func() {
 	It("accounts for resource check containers", func() {
 		atc.EnableGlobalResources = true
 		// register a worker with "git" resource type
-		registerWorker(atc.Worker{
-			Version: "0.0.0-dev",
-			Name:    "worker",
-			ResourceTypes: []atc.WorkerResourceType{{
-				Type: "git",
-			}},
-		})
+		registerWorker()
 		resources := atc.ResourceConfigs{
 			{
 				Name:   "r",
@@ -281,5 +287,120 @@ var _ = Describe("DBAccountant", func() {
 			workloadStrings = append(workloadStrings, workload.ToString())
 		}
 		Expect(workloadStrings).To(ContainElements("main/p/r", "main/p/s"))
+	})
+
+	createJob := func(jobConfig atc.JobConfig) db.Job {
+		pipeline, _, err := team.SavePipeline(
+			"p",
+			atc.Config{
+				Jobs: atc.JobConfigs{
+					jobConfig,
+				},
+			},
+			0,
+			false,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		job, _, err := pipeline.Job(jobConfig.Name)
+		Expect(err).NotTo(HaveOccurred())
+		return job
+	}
+
+	It("accounts for job build containers", func() {
+		// register a worker with "git" resource type
+		registerWorker()
+		job := createJob(atc.JobConfig{
+			Name: "some-job",
+			PlanSequence: []atc.Step{
+				{Config: &atc.TaskStep{
+					Name: "task",
+					Config: &atc.TaskConfig{
+						Platform: "linux",
+						Run: atc.TaskRunConfig{
+							Path: "foo",
+						},
+					},
+				}},
+			},
+		})
+		job.CreateBuild()
+		alg := algorithm.New(
+			db.NewVersionsDB(
+				dbConn,
+				100,
+				gocache.New(10*time.Second, 10*time.Second),
+			),
+		)
+
+		scheduler.NewRunner(
+			lagertest.NewTestLogger("scheduler"),
+			db.NewJobFactory(dbConn, lockFactory),
+			&scheduler.Scheduler{
+				Algorithm: alg,
+				BuildStarter: scheduler.NewBuildStarter(
+					builds.NewPlanner(
+						atc.NewPlanFactory(time.Now().Unix()),
+					),
+					alg),
+			},
+			32,
+		).Run(context.TODO())
+
+		fakeGClient := new(gclientfakes.FakeClient)
+		fakeGClientContainer := new(gclientfakes.FakeContainer)
+		fakeGClientContainer.RunStub = func(ctx context.Context, ps garden.ProcessSpec, pi garden.ProcessIO) (garden.Process, error) {
+			fakeProcess := new(gardenfakes.FakeProcess)
+			fakeProcess.WaitStub = func() (int, error) {
+				io.WriteString(pi.Stdout, "[]")
+				return 0, nil
+			}
+			return fakeProcess, nil
+		}
+		fakeGClient.CreateReturns(fakeGClientContainer, nil)
+		fakeBaggageclaimClient := new(baggageclaimfakes.FakeClient)
+		fakeBaggageclaimVolume := new(baggageclaimfakes.FakeVolume)
+		fakeBaggageclaimVolume.PathReturns("/path/to/fake/volume")
+		fakeBaggageclaimClient.LookupVolumeReturns(fakeBaggageclaimVolume, true, nil)
+
+		dbBuildFactory := db.NewBuildFactory(
+			dbConn,
+			lockFactory,
+			5*time.Minute,
+			120*time.Hour,
+		)
+		Eventually(dbBuildFactory.GetAllStartedBuilds).ShouldNot(BeEmpty())
+		builds.NewTracker(
+			dbBuildFactory,
+			testEngine(fakeGClient, fakeBaggageclaimClient),
+		).Run(
+			lagerctx.NewContext(
+				context.TODO(),
+				lagertest.NewTestLogger("build-tracker"),
+			),
+		)
+
+		// TODO wait for build to complete?
+
+		accountant := accounts.NewDBAccountant(flag.PostgresConfig{
+			Host:     dbHost(),
+			Port:     5432,
+			User:     "postgres",
+			Password: "password",
+			Database: testDBName(),
+			SSLMode:  "disable",
+		})
+		Eventually(team.Containers).ShouldNot(BeEmpty())
+		containers := []accounts.Container{}
+		dbContainers, _ := team.Containers()
+		for _, container := range dbContainers {
+			containers = append(containers, accounts.Container{Handle: container.Handle()})
+		}
+		samples, err := accountant.Account(containers)
+		Expect(err).NotTo(HaveOccurred())
+		workloadStrings := []string{}
+		for _, workload := range samples[0].Workloads {
+			workloadStrings = append(workloadStrings, workload.ToString())
+		}
+		Expect(workloadStrings).To(ConsistOf("main/p/some-job/1/task"))
 	})
 })
