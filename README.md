@@ -1,4 +1,4 @@
-# ~ctop~ concourse container accounting tool for operators
+# ft - flight tracker
 
 ## worker
 
@@ -17,10 +17,11 @@
 * container handles
 * open files
 * cpu shares
-* memmory
+* memory
 
 ## views
 
 * by pipeline
 * by team
 * prometheus exporter
+* sorting filtering grouping

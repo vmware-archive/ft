@@ -7,7 +7,7 @@ resources:
   type: git
   icon: github
   source:
-    uri: git@github.com:concourse/ctop.git
+    uri: git@github.com:concourse/ft.git
     branch: master
     private_key: ((deploy_key))
 - name: postgres-11
@@ -35,7 +35,7 @@ resources:
   icon: package-variant-closed
   source:
     owner: concourse
-    repository: ctop
+    repository: ft
     access_token: ((concourse_github_release.access_token))
 jobs:
 - name: test
@@ -93,10 +93,10 @@ jobs:
         - -c
         - |
           for platform in linux darwin windows; do
-            GOOS=$platform go build -o ../build/ctop-$platform
+            GOOS=$platform go build -o ../build/ft-$platform
           done
   - put: release
     params:
       name: tag/file
       tag: tag/file
-      globs: ["build/ctop-*"]
+      globs: ["build/ft-*"]
