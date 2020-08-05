@@ -1,7 +1,14 @@
 package accounts
 
+import "github.com/concourse/concourse/atc/db"
+
 type Sample struct {
 	Container Container
+	Labels    Labels
+}
+
+type Labels struct {
+	Type      db.ContainerType
 	Workloads []Workload
 }
 
@@ -13,7 +20,7 @@ type Accountant interface {
 
 type Container struct {
 	Handle string
-	Stats Stats
+	Stats  Stats
 }
 
 type Stats struct {

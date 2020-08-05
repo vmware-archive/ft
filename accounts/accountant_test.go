@@ -283,10 +283,11 @@ var _ = Describe("DBAccountant", func() {
 		samples, err := accountant.Account(containers)
 		Expect(err).NotTo(HaveOccurred())
 		workloadStrings := []string{}
-		for _, workload := range samples[0].Workloads {
+		for _, workload := range samples[0].Labels.Workloads {
 			workloadStrings = append(workloadStrings, workload.ToString())
 		}
 		Expect(workloadStrings).To(ContainElements("main/p/r", "main/p/s"))
+		Expect(samples[0].Labels.Type).To(Equal(db.ContainerTypeCheck))
 	})
 
 	createJob := func(jobConfig atc.JobConfig) db.Job {
@@ -398,7 +399,7 @@ var _ = Describe("DBAccountant", func() {
 		samples, err := accountant.Account(containers)
 		Expect(err).NotTo(HaveOccurred())
 		workloadStrings := []string{}
-		for _, workload := range samples[0].Workloads {
+		for _, workload := range samples[0].Labels.Workloads {
 			workloadStrings = append(workloadStrings, workload.ToString())
 		}
 		Expect(workloadStrings).To(ConsistOf("main/p/some-job/1/task"))

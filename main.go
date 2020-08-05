@@ -35,11 +35,12 @@ func printSamples(writer io.Writer, samples []accounts.Sample) error {
 	data := []ui.TableRow{}
 	for _, sample := range samples {
 		workloads := []string{}
-		for _, w := range sample.Workloads {
+		for _, w := range sample.Labels.Workloads {
 			workloads = append(workloads, w.ToString())
 		}
 		data = append(data, ui.TableRow{
 			ui.TableCell{Contents: sample.Container.Handle},
+			ui.TableCell{Contents: string(sample.Labels.Type)},
 			ui.TableCell{Contents: strings.Join(workloads, ",")},
 		})
 	}
@@ -47,6 +48,10 @@ func printSamples(writer io.Writer, samples []accounts.Sample) error {
 		Headers: ui.TableRow{
 			ui.TableCell{
 				Contents: "handle",
+				Color:    color.New(color.Bold),
+			},
+			ui.TableCell{
+				Contents: "type",
 				Color:    color.New(color.Bold),
 			},
 			ui.TableCell{
