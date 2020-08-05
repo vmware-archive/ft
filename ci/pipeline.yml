@@ -58,6 +58,7 @@ jobs:
   plan:
   - get: repo
     passed: [test]
+    trigger: true
   - get: go-1.14
     passed: [test]
   - task: tag
