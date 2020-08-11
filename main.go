@@ -5,9 +5,12 @@ import (
 	"os"
 	"strings"
 
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+
 	"github.com/concourse/concourse/fly/ui"
-	"github.com/concourse/flag"
 	"github.com/concourse/ctop/accounts"
+	"github.com/concourse/flag"
 	"github.com/fatih/color"
 	flags "github.com/jessevdk/go-flags"
 )
@@ -19,7 +22,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	worker := accounts.NewLANWorker()
+	// worker := accounts.NewLANWorker()
+	kubeConfigFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag()
+	f := cmdutil.NewFactory(kubeConfigFlags)
+	worker := accounts.NewK8sWorker(f)
 	accountant := accounts.NewDBAccountant(postgresConfig)
 	samples, err := accounts.Account(worker, accountant)
 	if err != nil {

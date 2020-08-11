@@ -3,29 +3,31 @@ module github.com/concourse/ctop
 go 1.14
 
 require (
+	cloud.google.com/go v0.51.0 // indirect
 	code.cloudfoundry.org/clock v0.0.0-20180518195852-02e53af36e6c
 	code.cloudfoundry.org/garden v0.0.0-20181108172608-62470dc86365
 	code.cloudfoundry.org/lager v2.0.0+incompatible
 	github.com/Masterminds/squirrel v1.1.0
-	github.com/The-Cloud-Source/goryman v0.0.0-20150410173800-c22b6e4a7ac1 // indirect
-	github.com/bmatcuk/doublestar v1.3.1 // indirect
-	github.com/cloudfoundry/bosh-cli v6.3.1+incompatible // indirect
-	github.com/cloudfoundry/bosh-utils v0.0.0-20200711100206-536f54a5c954 // indirect
-	github.com/concourse/atc v4.2.2+incompatible
-	github.com/concourse/baggageclaim v1.6.6
-	github.com/concourse/concourse v1.6.1-0.20200710133454-0565fd9ebe7c
-	github.com/concourse/flag v1.0.0
+	github.com/concourse/baggageclaim v1.8.0
+	github.com/concourse/concourse v1.6.1-0.20200811134233-6fdc412c6b5a
+	github.com/concourse/flag v1.1.0
 	github.com/concourse/retryhttp v1.0.2
-	github.com/cppforlife/go-patch v0.2.0 // indirect
 	github.com/cppforlife/go-semi-semantic v0.0.0-20160921010311-576b6af77ae4
 	github.com/fatih/color v1.7.0
-	github.com/influxdata/influxdb v1.8.1 // indirect
+	github.com/go-sql-driver/mysql v1.4.1 // indirect
 	github.com/jessevdk/go-flags v1.4.0
+	github.com/mattn/go-sqlite3 v1.11.0 // indirect
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.2.3
 	github.com/onsi/ginkgo v1.13.0
 	github.com/onsi/gomega v1.10.1
-	github.com/papertrail/remote_syslog2 v0.0.0-20190614180052-09062fc2b02a // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible
-	github.com/tedsuo/ifrit v0.0.0-20180802180643-bea94bb476cc
-	gopkg.in/cheggaaa/pb.v1 v1.0.28 // indirect
+	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
+	google.golang.org/genproto v0.0.0-20200108215221-bd8f9a0ef82f // indirect
+	k8s.io/api v0.18.6
+	k8s.io/apimachinery v0.18.6
+	k8s.io/cli-runtime v0.18.6
+	k8s.io/client-go v11.0.0+incompatible
+	k8s.io/kubectl v0.18.6
 )
+
+replace k8s.io/client-go v11.0.0+incompatible => k8s.io/client-go v0.18.6
