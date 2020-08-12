@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/concourse/concourse/fly/ui"
 	"github.com/concourse/ctop/accounts"

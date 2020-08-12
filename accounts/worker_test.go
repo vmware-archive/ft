@@ -2,7 +2,9 @@ package accounts_test
 
 import (
 	// "fmt"
+	"fmt"
 	"net"
+	"net/http"
 	// "net/http"
 
 	"code.cloudfoundry.org/garden"
@@ -16,10 +18,10 @@ import (
 
 	// corev1 "k8s.io/api/core/v1"
 	// metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubectl/pkg/scheme"
-	"k8s.io/client-go/rest/fake"
-	restclient "k8s.io/client-go/rest"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/rest/fake"
+	"k8s.io/kubectl/pkg/scheme"
 
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
 )
@@ -73,10 +75,6 @@ var _ = Describe("Worker", func() {
 			tf.Client = &fake.RESTClient{
 				GroupVersion:         schema.GroupVersion{Group: "", Version: "v1"},
 				NegotiatedSerializer: ns,
-				// Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-				// 	fmt.Println("client", req)
-				// 	return nil, nil
-				// }),
 			}
 			tf.ClientConfigVal = &restclient.Config{APIPath: "/api", ContentConfig: restclient.ContentConfig{NegotiatedSerializer: scheme.Codecs, GroupVersion: &schema.GroupVersion{Version: "v1"}}}
 

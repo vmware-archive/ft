@@ -1,14 +1,17 @@
 package accounts
 
 import (
+	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
-	// "fmt"
 
 	"code.cloudfoundry.org/lager"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/transport/spdy"
 
@@ -45,7 +48,8 @@ type K8sWorker struct {
 }
 
 type StreamConn struct {
-	httpstream.Stream
+	conn   httpstream.Connection
+	stream httpstream.Stream
 }
 
 type StreamAddr struct {
@@ -59,23 +63,43 @@ func (sa *StreamAddr) String() string {
 	return "127.0.0.1:7777"
 }
 
+func (sc *StreamConn) Write(p []byte) (n int, err error) {
+	fmt.Println("Write", string(p))
+	return sc.stream.Write(p)
+}
+
+func (sc *StreamConn) Read(p []byte) (n int, err error) {
+	fmt.Println("Read", string(p))
+	return sc.stream.Read(p)
+}
+
+func (sc *StreamConn) Close() error {
+	fmt.Println("Close")
+	return sc.conn.Close()
+}
+
 func (sc *StreamConn) LocalAddr() net.Addr {
+	fmt.Println("LocalAddr")
 	return &StreamAddr{}
 }
 
 func (sc *StreamConn) RemoteAddr() net.Addr {
+	fmt.Println("RemoteAddr")
 	return &StreamAddr{}
 }
 
 func (sc *StreamConn) SetDeadline(t time.Time) error {
+	fmt.Println("SetDeadline", t)
 	return nil
 }
 
 func (sc *StreamConn) SetReadDeadline(t time.Time) error {
+	fmt.Println("SetReadDeadline", t)
 	return nil
 }
 
 func (sc *StreamConn) SetWriteDeadline(t time.Time) error {
+	fmt.Println("SetReadDeadline", t)
 	return nil
 }
 
@@ -120,14 +144,17 @@ func (kw *K8sWorker) Containers(opts ...StatsOption) ([]Container, error) {
 		headers.Set(v1.PortHeader, "7777")
 
 		// TODO do we need this:
-		// headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(requestID))
+		headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(0))
 
 		stream, err := streamConn.CreateStream(headers)
+		headers.Set(v1.StreamType, v1.StreamTypeError)
+		errorStream, err := streamConn.CreateStream(headers)
+		go io.Copy(errorStream, os.Stdout)
 		// TODO why should this error? Test
 		if err != nil {
 			return nil, err
 		}
-		return &StreamConn{stream}, nil
+		return &StreamConn{streamConn, stream}, nil
 	}
 	handles, err := connection.NewWithDialerAndLogger(
 		dialerFunc,
