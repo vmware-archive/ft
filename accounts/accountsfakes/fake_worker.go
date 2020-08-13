@@ -4,7 +4,7 @@ package accountsfakes
 import (
 	"sync"
 
-	"github.com/concourse/ctop/accounts"
+	"github.com/concourse/ft/accounts"
 )
 
 type FakeWorker struct {

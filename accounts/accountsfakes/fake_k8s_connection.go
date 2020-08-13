@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/concourse/ctop/accounts"
+	"github.com/concourse/ft/accounts"
 	"k8s.io/client-go/rest"
 )
 

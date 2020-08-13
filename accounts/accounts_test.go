@@ -3,8 +3,8 @@ package accounts_test
 import (
 	"errors"
 
-	"github.com/concourse/ctop/accounts"
-	"github.com/concourse/ctop/accounts/accountsfakes"
+	"github.com/concourse/ft/accounts"
+	"github.com/concourse/ft/accounts/accountsfakes"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )

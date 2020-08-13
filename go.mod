@@ -1,4 +1,4 @@
-module github.com/concourse/ctop
+module github.com/concourse/ft
 
 go 1.14
 

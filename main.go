@@ -8,7 +8,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/concourse/concourse/fly/ui"
-	"github.com/concourse/ctop/accounts"
+	"github.com/concourse/ft/accounts"
 	"github.com/concourse/flag"
 	"github.com/fatih/color"
 	flags "github.com/jessevdk/go-flags"
