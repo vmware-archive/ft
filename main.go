@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 
 	"github.com/concourse/concourse/fly/ui"
 	"github.com/concourse/ctop/accounts"
@@ -26,7 +26,15 @@ func main() {
 	// worker := accounts.NewLANWorker()
 	kubeConfigFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag()
 	f := cmdutil.NewFactory(kubeConfigFlags)
-	worker := accounts.NewK8sWorker(f)
+	restConfig, err := f.ToRESTConfig()
+	if err != nil {
+		panic(err)
+	}
+	worker := &accounts.GardenWorker{
+		Dialer: &accounts.K8sGardenDialer{
+			Conn: accounts.NewK8sConnection(restConfig),
+		},
+	}
 	accountant := accounts.NewDBAccountant(postgresConfig)
 	samples, err := accounts.Account(worker, accountant)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -13,22 +14,24 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport/spdy"
 
 	"code.cloudfoundry.org/garden/client/connection"
 	"k8s.io/client-go/tools/portforward"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
-func NewLANWorker() Worker {
-	return &LANWorker{}
+type GardenWorker struct {
+	Dialer GardenDialer
 }
 
-type LANWorker struct {
-}
-
-func (lw *LANWorker) Containers(opts ...StatsOption) ([]Container, error) {
-	handles, err := connection.New("tcp", "127.0.0.1:7777").List(nil)
+func (gw *GardenWorker) Containers(opts ...StatsOption) ([]Container, error) {
+	handles, err := connection.NewWithDialerAndLogger(
+		func(string, string) (net.Conn, error) {
+			return gw.Dialer.Dial()
+		},
+		lager.NewLogger("garden-connection"),
+	).List(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -39,12 +42,93 @@ func (lw *LANWorker) Containers(opts ...StatsOption) ([]Container, error) {
 	return containers, nil
 }
 
-func NewK8sWorker(f cmdutil.Factory) Worker {
-	return &K8sWorker{f: f}
+type GardenDialer interface {
+	Dial() (net.Conn, error)
 }
 
-type K8sWorker struct {
-	f cmdutil.Factory
+type LANGardenDialer struct{}
+
+func (lgd *LANGardenDialer) Dial() (net.Conn, error) {
+	return net.Dial("tcp", "127.0.0.1:7777")
+}
+
+type K8sGardenDialer struct {
+	Conn K8sConnection
+}
+
+func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
+	// TODO why should this error? Test
+	transport, upgrader, err := spdy.RoundTripperFor(kgd.Conn.RESTConfig())
+	if err != nil {
+		return nil, err
+	}
+	// TODO why should this error? Test
+	url, err := kgd.Conn.URL()
+	if err != nil {
+		return nil, err
+	}
+	dialer := spdy.NewDialer(
+		upgrader,
+		&http.Client{Transport: transport},
+		"POST",
+		url,
+	)
+	streamConn, _, err := dialer.Dial(portforward.PortForwardProtocolV1Name)
+	// TODO why should this error? Test
+	if err != nil {
+		return nil, err
+	}
+	headers := http.Header{}
+	headers.Set(v1.StreamType, v1.StreamTypeData)
+	headers.Set(v1.PortHeader, "7777")
+
+	// TODO do we need this:
+	headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(0))
+
+	stream, err := streamConn.CreateStream(headers)
+	headers.Set(v1.StreamType, v1.StreamTypeError)
+	errorStream, err := streamConn.CreateStream(headers)
+	// TODO why should this error? Test
+	if err != nil {
+		return nil, err
+	}
+	go io.Copy(errorStream, os.Stdout)
+	return &StreamConn{streamConn, stream}, nil
+}
+
+//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . K8sConnection
+
+type K8sConnection interface {
+	RESTConfig() *rest.Config
+	URL() (*url.URL, error)
+}
+
+type systemK8sConnection struct {
+	restConfig *rest.Config
+}
+
+func NewK8sConnection(restConfig *rest.Config) K8sConnection {
+	return &systemK8sConnection{restConfig}
+}
+
+func (kc *systemK8sConnection) RESTConfig() *rest.Config {
+	return kc.restConfig
+}
+
+func (kc *systemK8sConnection) URL() (*url.URL, error) {
+	namespace := "ci"
+	podName := "ci-worker-0"
+	restClient, err := rest.RESTClientFor(kc.restConfig)
+	if err != nil {
+		return nil, err
+	}
+	return restClient.
+		Post().
+		Resource("pods").
+		Namespace(namespace).
+		Name(podName).
+		SubResource("portforward").
+		URL(), nil
 }
 
 type StreamConn struct {
@@ -101,71 +185,4 @@ func (sc *StreamConn) SetReadDeadline(t time.Time) error {
 func (sc *StreamConn) SetWriteDeadline(t time.Time) error {
 	fmt.Println("SetReadDeadline", t)
 	return nil
-}
-
-func (kw *K8sWorker) Containers(opts ...StatsOption) ([]Container, error) {
-	namespace := "ci"
-	podName := "ci-worker-0"
-	// TODO why should this error? Test
-	restConfig, err := kw.f.ToRESTConfig()
-	if err != nil {
-		return nil, err
-	}
-	// TODO why should this error? Test
-	transport, upgrader, err := spdy.RoundTripperFor(restConfig)
-	if err != nil {
-		return nil, err
-	}
-	// TODO why should this error? Test
-	restClient, err := kw.f.RESTClient()
-	if err != nil {
-		return nil, err
-	}
-	dialer := spdy.NewDialer(
-		upgrader,
-		&http.Client{Transport: transport},
-		"POST",
-		restClient.
-			Post().
-			Resource("pods").
-			Namespace(namespace).
-			Name(podName).
-			SubResource("portforward").
-			URL(),
-	)
-	dialerFunc := func(network, address string) (net.Conn, error) {
-		streamConn, _, err := dialer.Dial(portforward.PortForwardProtocolV1Name)
-		// TODO why should this error? Test
-		if err != nil {
-			return nil, err
-		}
-		headers := http.Header{}
-		headers.Set(v1.StreamType, v1.StreamTypeData)
-		headers.Set(v1.PortHeader, "7777")
-
-		// TODO do we need this:
-		headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(0))
-
-		stream, err := streamConn.CreateStream(headers)
-		headers.Set(v1.StreamType, v1.StreamTypeError)
-		errorStream, err := streamConn.CreateStream(headers)
-		go io.Copy(errorStream, os.Stdout)
-		// TODO why should this error? Test
-		if err != nil {
-			return nil, err
-		}
-		return &StreamConn{streamConn, stream}, nil
-	}
-	handles, err := connection.NewWithDialerAndLogger(
-		dialerFunc,
-		lager.NewLogger("garden-connection"),
-	).List(nil)
-	if err != nil {
-		return nil, err
-	}
-	containers := []Container{}
-	for _, handle := range handles {
-		containers = append(containers, Container{Handle: handle})
-	}
-	return containers, nil
 }
