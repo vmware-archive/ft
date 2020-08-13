@@ -18,16 +18,10 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gstruct"
-
-	// corev1 "k8s.io/api/core/v1"
-	// metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-
 	"k8s.io/client-go/tools/remotecommand"
-
-	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
-
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
+	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 )
 
 var _ = Describe("Worker", func() {
@@ -86,15 +80,14 @@ var _ = Describe("Worker", func() {
 				io.Copy(buf, conn)
 				return nil
 			}
-
 			resp, err := s.GetPortForward(&runtimeapi.PortForwardRequest{
 				PodSandboxId: "foo",
 				Port:         []int32{7777},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			k8sConn := new(accountsfakes.FakeK8sConnection)
 			testURL, err := url.Parse(resp.Url)
 			Expect(err).NotTo(HaveOccurred())
+			k8sConn := new(accountsfakes.FakeK8sConnection)
 			k8sConn.URLReturns(testURL, nil)
 			k8sConn.RESTConfigReturns(cmdtesting.DefaultClientConfig())
 			dialer := accounts.K8sGardenDialer{
@@ -102,13 +95,16 @@ var _ = Describe("Worker", func() {
 			}
 
 			conn, err := dialer.Dial()
+
 			Expect(err).NotTo(HaveOccurred())
 			conn.Write([]byte("hello world"))
 			conn.Close()
-			Expect(buf).To(gbytes.Say("hello world"))
+			Eventually(buf).Should(gbytes.Say("hello world"))
 		})
 	})
 })
+
+// TODO we can probably use a counterfeiter fake for this
 
 type fakeRuntime struct {
 	execFunc        func(string, []string, io.Reader, io.WriteCloser, io.WriteCloser, bool, <-chan remotecommand.TerminalSize) error
@@ -137,6 +133,11 @@ type testStreamingServer struct {
 func newTestStreamingServer(streamIdleTimeout time.Duration) (s *testStreamingServer, err error) {
 	s = &testStreamingServer{}
 	s.testHTTPServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// TODO we can probably make this smart enough to take a
+		// request to /api/v1/namespaces/ns/pods/pod/portforward
+		// and actually do a GetPortForward on the underlying
+		// StreamingServer, so that logic doesn't need to live in
+		// the body of the test.
 		s.ServeHTTP(w, r)
 	}))
 	defer func() {

@@ -5,9 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 
 	"github.com/concourse/concourse/fly/ui"
 	"github.com/concourse/ctop/accounts"
@@ -16,26 +14,37 @@ import (
 	flags "github.com/jessevdk/go-flags"
 )
 
+type Command struct {
+	Postgres     flag.PostgresConfig `group:"PostgreSQL Configuration" namespace:"postgres"`
+	K8sNamespace string              `long:"k8s-namespace"`
+	K8sPod       string              `long:"k8s-pod"`
+}
+
 func main() {
-	postgresConfig := flag.PostgresConfig{}
-	parser := flags.NewParser(&postgresConfig, flags.HelpFlag|flags.PassDoubleDash)
+	cmd := Command{}
+	parser := flags.NewParser(&cmd, flags.HelpFlag|flags.PassDoubleDash)
+	parser.NamespaceDelimiter = "-"
 	_, err := parser.Parse()
 	if err != nil {
 		panic(err)
 	}
-	// worker := accounts.NewLANWorker()
-	kubeConfigFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag()
-	f := cmdutil.NewFactory(kubeConfigFlags)
-	restConfig, err := f.ToRESTConfig()
-	if err != nil {
-		panic(err)
+	var dialer accounts.GardenDialer
+	if cmd.K8sNamespace != "" && cmd.K8sPod != "" {
+		k8sConn, err := accounts.NewK8sConnection(
+			cmd.K8sNamespace,
+			cmd.K8sPod,
+		)
+		if err != nil {
+			panic(err)
+		}
+		dialer = &accounts.K8sGardenDialer{Conn: k8sConn}
+	} else {
+		dialer = &accounts.LANGardenDialer{}
 	}
 	worker := &accounts.GardenWorker{
-		Dialer: &accounts.K8sGardenDialer{
-			Conn: accounts.NewK8sConnection(restConfig),
-		},
+		Dialer: dialer,
 	}
-	accountant := accounts.NewDBAccountant(postgresConfig)
+	accountant := accounts.NewDBAccountant(cmd.Postgres)
 	samples, err := accounts.Account(worker, accountant)
 	if err != nil {
 		panic(err)

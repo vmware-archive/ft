@@ -1,24 +1,21 @@
 package accounts
 
 import (
-	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"strconv"
 	"time"
 
-	"code.cloudfoundry.org/lager"
-
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/transport/spdy"
-
 	"code.cloudfoundry.org/garden/client/connection"
+	"code.cloudfoundry.org/lager"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
+	"k8s.io/kubectl/pkg/scheme"
 )
 
 type GardenWorker struct {
@@ -67,13 +64,12 @@ func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	dialer := spdy.NewDialer(
+	streamConn, _, err := spdy.NewDialer(
 		upgrader,
 		&http.Client{Transport: transport},
 		"POST",
 		url,
-	)
-	streamConn, _, err := dialer.Dial(portforward.PortForwardProtocolV1Name)
+	).Dial(portforward.PortForwardProtocolV1Name)
 	// TODO why should this error? Test
 	if err != nil {
 		return nil, err
@@ -81,18 +77,15 @@ func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
 	headers := http.Header{}
 	headers.Set(v1.StreamType, v1.StreamTypeData)
 	headers.Set(v1.PortHeader, "7777")
-
-	// TODO do we need this:
-	headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(0))
-
+	headers.Set(v1.PortForwardRequestIDHeader, "0")
 	stream, err := streamConn.CreateStream(headers)
-	headers.Set(v1.StreamType, v1.StreamTypeError)
-	errorStream, err := streamConn.CreateStream(headers)
 	// TODO why should this error? Test
 	if err != nil {
 		return nil, err
 	}
-	go io.Copy(errorStream, os.Stdout)
+
+	headers.Set(v1.StreamType, v1.StreamTypeError)
+	streamConn.CreateStream(headers)
 	return &StreamConn{streamConn, stream}, nil
 }
 
@@ -105,10 +98,26 @@ type K8sConnection interface {
 
 type systemK8sConnection struct {
 	restConfig *rest.Config
+	namespace  string
+	podName    string
 }
 
-func NewK8sConnection(restConfig *rest.Config) K8sConnection {
-	return &systemK8sConnection{restConfig}
+func NewK8sConnection(namespace, podName string) (K8sConnection, error) {
+	restConfig, err := genericclioptions.
+		NewConfigFlags(true).
+		WithDeprecatedPasswordFlag().
+		ToRESTConfig()
+	if err != nil {
+		return nil, err
+	}
+	restConfig.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
+	restConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	restConfig.APIPath = "/api"
+	return &systemK8sConnection{
+		restConfig: restConfig,
+		namespace:  namespace,
+		podName:    podName,
+	}, nil
 }
 
 func (kc *systemK8sConnection) RESTConfig() *rest.Config {
@@ -116,8 +125,6 @@ func (kc *systemK8sConnection) RESTConfig() *rest.Config {
 }
 
 func (kc *systemK8sConnection) URL() (*url.URL, error) {
-	namespace := "ci"
-	podName := "ci-worker-0"
 	restClient, err := rest.RESTClientFor(kc.restConfig)
 	if err != nil {
 		return nil, err
@@ -125,8 +132,8 @@ func (kc *systemK8sConnection) URL() (*url.URL, error) {
 	return restClient.
 		Post().
 		Resource("pods").
-		Namespace(namespace).
-		Name(podName).
+		Namespace(kc.namespace).
+		Name(kc.podName).
 		SubResource("portforward").
 		URL(), nil
 }
@@ -148,41 +155,33 @@ func (sa *StreamAddr) String() string {
 }
 
 func (sc *StreamConn) Write(p []byte) (n int, err error) {
-	fmt.Println("Write", string(p))
 	return sc.stream.Write(p)
 }
 
 func (sc *StreamConn) Read(p []byte) (n int, err error) {
-	fmt.Println("Read", string(p))
 	return sc.stream.Read(p)
 }
 
 func (sc *StreamConn) Close() error {
-	fmt.Println("Close")
 	return sc.conn.Close()
 }
 
 func (sc *StreamConn) LocalAddr() net.Addr {
-	fmt.Println("LocalAddr")
 	return &StreamAddr{}
 }
 
 func (sc *StreamConn) RemoteAddr() net.Addr {
-	fmt.Println("RemoteAddr")
 	return &StreamAddr{}
 }
 
 func (sc *StreamConn) SetDeadline(t time.Time) error {
-	fmt.Println("SetDeadline", t)
 	return nil
 }
 
 func (sc *StreamConn) SetReadDeadline(t time.Time) error {
-	fmt.Println("SetReadDeadline", t)
 	return nil
 }
 
 func (sc *StreamConn) SetWriteDeadline(t time.Time) error {
-	fmt.Println("SetReadDeadline", t)
 	return nil
 }
