@@ -1,6 +1,78 @@
 package accounts
 
-import "github.com/concourse/concourse/atc/db"
+import (
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/concourse/concourse/atc/db"
+	"github.com/concourse/concourse/fly/ui"
+	"github.com/fatih/color"
+	"github.com/jessevdk/go-flags"
+)
+
+func Execute(workerFactory WorkerFactory, args []string, stdout io.Writer) int {
+	cmd, err := parseArgs(args)
+	if err != nil {
+		panic(err)
+	}
+	worker, err := workerFactory.CreateWorker(cmd)
+	if err != nil {
+		panic(err)
+	}
+	accountant := NewDBAccountant(cmd.Postgres)
+	samples, err := Account(worker, accountant)
+	if err != nil {
+		fmt.Fprintln(stdout, err.Error())
+		return 1
+	}
+	err = printSamples(stdout, samples)
+	if err != nil {
+		panic(err)
+	}
+	return 0
+}
+
+func parseArgs(args []string) (Command, error) {
+	cmd := Command{}
+	parser := flags.NewParser(&cmd, flags.HelpFlag|flags.PassDoubleDash)
+	parser.NamespaceDelimiter = "-"
+	_, err := parser.ParseArgs(args)
+	return cmd, err
+}
+
+func printSamples(writer io.Writer, samples []Sample) error {
+	data := []ui.TableRow{}
+	for _, sample := range samples {
+		workloads := []string{}
+		for _, w := range sample.Labels.Workloads {
+			workloads = append(workloads, w.ToString())
+		}
+		data = append(data, ui.TableRow{
+			ui.TableCell{Contents: sample.Container.Handle},
+			ui.TableCell{Contents: string(sample.Labels.Type)},
+			ui.TableCell{Contents: strings.Join(workloads, ",")},
+		})
+	}
+	table := ui.Table{
+		Headers: ui.TableRow{
+			ui.TableCell{
+				Contents: "handle",
+				Color:    color.New(color.Bold),
+			},
+			ui.TableCell{
+				Contents: "type",
+				Color:    color.New(color.Bold),
+			},
+			ui.TableCell{
+				Contents: "workloads",
+				Color:    color.New(color.Bold),
+			},
+		},
+		Data: data,
+	}
+	return table.Render(writer, true)
+}
 
 type Sample struct {
 	Container Container
