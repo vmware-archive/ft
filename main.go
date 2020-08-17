@@ -8,8 +8,8 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/concourse/concourse/fly/ui"
-	"github.com/concourse/ft/accounts"
 	"github.com/concourse/flag"
+	"github.com/concourse/ft/accounts"
 	"github.com/fatih/color"
 	flags "github.com/jessevdk/go-flags"
 )
@@ -30,14 +30,15 @@ func main() {
 	}
 	var dialer accounts.GardenDialer
 	if cmd.K8sNamespace != "" && cmd.K8sPod != "" {
-		k8sConn, err := accounts.NewK8sConnection(
-			cmd.K8sNamespace,
-			cmd.K8sPod,
-		)
+		restConfig, err := accounts.RESTConfig()
 		if err != nil {
 			panic(err)
 		}
-		dialer = &accounts.K8sGardenDialer{Conn: k8sConn}
+		dialer = &accounts.K8sGardenDialer{
+			RESTConfig: restConfig,
+			Namespace:  cmd.K8sNamespace,
+			PodName:    cmd.K8sPod,
+		}
 	} else {
 		dialer = &accounts.LANGardenDialer{}
 	}

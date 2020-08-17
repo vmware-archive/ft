@@ -3,7 +3,6 @@ package accounts
 import (
 	"net"
 	"net/http"
-	"net/url"
 	"time"
 
 	"code.cloudfoundry.org/garden/client/connection"
@@ -50,17 +49,27 @@ func (lgd *LANGardenDialer) Dial() (net.Conn, error) {
 }
 
 type K8sGardenDialer struct {
-	Conn K8sConnection
+	RESTConfig *rest.Config
+	Namespace  string
+	PodName    string
 }
 
 func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
-	// TODO why should this error? Test
-	transport, upgrader, err := spdy.RoundTripperFor(kgd.Conn.RESTConfig())
+	transport, upgrader, err := spdy.RoundTripperFor(kgd.RESTConfig)
 	if err != nil {
 		return nil, err
 	}
-	// TODO why should this error? Test
-	url, err := kgd.Conn.URL()
+	restClient, err := rest.RESTClientFor(kgd.RESTConfig)
+	if err != nil {
+		return nil, err
+	}
+	url := restClient.
+		Post().
+		Resource("pods").
+		Namespace(kgd.Namespace).
+		Name(kgd.PodName).
+		SubResource("portforward").
+		URL()
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +79,6 @@ func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
 		"POST",
 		url,
 	).Dial(portforward.PortForwardProtocolV1Name)
-	// TODO why should this error? Test
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +87,6 @@ func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
 	headers.Set(v1.PortHeader, "7777")
 	headers.Set(v1.PortForwardRequestIDHeader, "0")
 	stream, err := streamConn.CreateStream(headers)
-	// TODO why should this error? Test
 	if err != nil {
 		return nil, err
 	}
@@ -89,53 +96,18 @@ func (kgd *K8sGardenDialer) Dial() (net.Conn, error) {
 	return &StreamConn{streamConn, stream}, nil
 }
 
-//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . K8sConnection
-
-type K8sConnection interface {
-	RESTConfig() *rest.Config
-	URL() (*url.URL, error)
-}
-
-type systemK8sConnection struct {
-	restConfig *rest.Config
-	namespace  string
-	podName    string
-}
-
-func NewK8sConnection(namespace, podName string) (K8sConnection, error) {
+func RESTConfig() (*rest.Config, error) {
 	restConfig, err := genericclioptions.
 		NewConfigFlags(true).
 		WithDeprecatedPasswordFlag().
 		ToRESTConfig()
 	if err != nil {
-		return nil, err
+		return restConfig, err
 	}
 	restConfig.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
 	restConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 	restConfig.APIPath = "/api"
-	return &systemK8sConnection{
-		restConfig: restConfig,
-		namespace:  namespace,
-		podName:    podName,
-	}, nil
-}
-
-func (kc *systemK8sConnection) RESTConfig() *rest.Config {
-	return kc.restConfig
-}
-
-func (kc *systemK8sConnection) URL() (*url.URL, error) {
-	restClient, err := rest.RESTClientFor(kc.restConfig)
-	if err != nil {
-		return nil, err
-	}
-	return restClient.
-		Post().
-		Resource("pods").
-		Namespace(kc.namespace).
-		Name(kc.podName).
-		SubResource("portforward").
-		URL(), nil
+	return restConfig, nil
 }
 
 type StreamConn struct {
