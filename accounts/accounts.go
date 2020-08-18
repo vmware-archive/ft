@@ -11,26 +11,41 @@ import (
 	"github.com/jessevdk/go-flags"
 )
 
-func Execute(workerFactory WorkerFactory, args []string, stdout io.Writer) int {
+func Execute(workerFactory WorkerFactory, accountantFactory AccountantFactory, args []string, stdout io.Writer) int {
 	cmd, err := parseArgs(args)
 	if err != nil {
-		panic(err)
-	}
-	worker, err := workerFactory.CreateWorker(cmd)
-	if err != nil {
-		panic(err)
-	}
-	accountant := NewDBAccountant(cmd.Postgres)
-	samples, err := Account(worker, accountant)
-	if err != nil {
 		fmt.Fprintln(stdout, err.Error())
+		return flagErrorReturnCode(err)
+	}
+	worker, err := workerFactory(cmd)
+	if err != nil {
+		fmt.Fprintf(stdout, "configuration error: %s\n", err.Error())
+		return 1
+	}
+	accountant := accountantFactory(cmd)
+	containers, err := worker.Containers()
+	if err != nil {
+		fmt.Fprintf(stdout, "worker error: %s\n", err.Error())
+		return 1
+	}
+	samples, err := accountant.Account(containers)
+	if err != nil {
+		fmt.Fprintf(stdout, "accountant error: %s\n", err.Error())
 		return 1
 	}
 	err = printSamples(stdout, samples)
 	if err != nil {
-		panic(err)
+		return 1
 	}
 	return 0
+}
+
+func flagErrorReturnCode(err error) int {
+	ourErr, ok := err.(*flags.Error)
+	if ok && ourErr.Type == flags.ErrHelp {
+		return 0
+	}
+	return 1
 }
 
 func parseArgs(args []string) (Command, error) {
@@ -115,11 +130,3 @@ type Worker interface {
 }
 
 type StatsOption func()
-
-func Account(w Worker, a Accountant) ([]Sample, error) {
-	containers, err := w.Containers()
-	if err != nil {
-		return nil, err
-	}
-	return a.Account(containers)
-}

@@ -10,17 +10,9 @@ type Command struct {
 	K8sPod       string              `long:"k8s-pod"`
 }
 
-//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 . WorkerFactory
+type WorkerFactory func(Command) (Worker, error)
 
-type WorkerFactory interface {
-	CreateWorker(Command) (Worker, error)
-}
-
-type workerFactory struct{}
-
-var DefaultWorkerFactory WorkerFactory = &workerFactory{}
-
-func (wf *workerFactory) CreateWorker(cmd Command) (Worker, error) {
+var DefaultWorkerFactory WorkerFactory = func(cmd Command) (Worker, error) {
 	var dialer GardenDialer
 	if cmd.K8sNamespace != "" && cmd.K8sPod != "" {
 		restConfig, err := RESTConfig()

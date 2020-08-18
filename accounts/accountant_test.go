@@ -266,14 +266,16 @@ var _ = Describe("DBAccountant", func() {
 		}
 		createResources(resources)
 		checkResources()
-		accountant := accounts.NewDBAccountant(flag.PostgresConfig{
-			Host:     dbHost(),
-			Port:     5432,
-			User:     "postgres",
-			Password: "password",
-			Database: testDBName(),
-			SSLMode:  "disable",
-		})
+		accountant := &accounts.DBAccountant{
+			PostgresConfig: flag.PostgresConfig{
+				Host:     dbHost(),
+				Port:     5432,
+				User:     "postgres",
+				Password: "password",
+				Database: testDBName(),
+				SSLMode:  "disable",
+			},
+		}
 		Eventually(team.Containers).ShouldNot(BeEmpty())
 		containers := []accounts.Container{}
 		dbContainers, _ := team.Containers()
@@ -357,6 +359,14 @@ var _ = Describe("DBAccountant", func() {
 			}
 			return fakeProcess, nil
 		}
+		fakeGClientContainer.AttachStub = func(ctx context.Context, foo string, pi garden.ProcessIO) (garden.Process, error) {
+			fakeProcess := new(gardenfakes.FakeProcess)
+			fakeProcess.WaitStub = func() (int, error) {
+				io.WriteString(pi.Stdout, "[]")
+				return 0, nil
+			}
+			return fakeProcess, nil
+		}
 		fakeGClient.CreateReturns(fakeGClientContainer, nil)
 		fakeBaggageclaimClient := new(baggageclaimfakes.FakeClient)
 		fakeBaggageclaimVolume := new(baggageclaimfakes.FakeVolume)
@@ -382,14 +392,16 @@ var _ = Describe("DBAccountant", func() {
 
 		// TODO wait for build to complete?
 
-		accountant := accounts.NewDBAccountant(flag.PostgresConfig{
-			Host:     dbHost(),
-			Port:     5432,
-			User:     "postgres",
-			Password: "password",
-			Database: testDBName(),
-			SSLMode:  "disable",
-		})
+		accountant := &accounts.DBAccountant{
+			PostgresConfig: flag.PostgresConfig{
+				Host:     dbHost(),
+				Port:     5432,
+				User:     "postgres",
+				Password: "password",
+				Database: testDBName(),
+				SSLMode:  "disable",
+			},
+		}
 		Eventually(team.Containers).ShouldNot(BeEmpty())
 		containers := []accounts.Container{}
 		dbContainers, _ := team.Containers()

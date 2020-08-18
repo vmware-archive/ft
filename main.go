@@ -11,6 +11,7 @@ import (
 func main() {
 	returnCode := accounts.Execute(
 		accounts.DefaultWorkerFactory,
+		accounts.DefaultAccountantFactory,
 		os.Args[1:],
 		os.Stdout,
 	)
