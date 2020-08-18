@@ -8,16 +8,18 @@ import (
 	"github.com/concourse/flag"
 )
 
-func NewDBAccountant(pgc flag.PostgresConfig) Accountant {
-	return &DBAccountant{postgresConfig: pgc}
+type AccountantFactory func(Command) Accountant
+
+var DefaultAccountantFactory = func(cmd Command) Accountant {
+	return &DBAccountant{PostgresConfig: cmd.Postgres}
 }
 
 type DBAccountant struct {
-	postgresConfig flag.PostgresConfig
+	PostgresConfig flag.PostgresConfig
 }
 
 func (da *DBAccountant) Account(containers []Container) ([]Sample, error) {
-	conn, err := sql.Open("postgres", da.postgresConfig.ConnectionString())
+	conn, err := sql.Open("postgres", da.PostgresConfig.ConnectionString())
 	if err != nil {
 		return nil, err
 	}
