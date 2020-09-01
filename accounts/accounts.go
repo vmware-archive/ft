@@ -7,15 +7,31 @@ import (
 
 	"github.com/concourse/concourse/atc/db"
 	"github.com/concourse/concourse/fly/ui"
+	"github.com/concourse/flag"
 	"github.com/fatih/color"
-	"github.com/jessevdk/go-flags"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
-func Execute(workerFactory WorkerFactory, accountantFactory AccountantFactory, args []string, stdout io.Writer) int {
-	cmd, err := parseArgs(args)
+func Execute(
+	workerFactory WorkerFactory,
+	accountantFactory AccountantFactory,
+	validator func(Command) error,
+	args []string,
+	stdout io.Writer,
+) int {
+	cmd, err := parseArgs(args, stdout)
+	if err == pflag.ErrHelp {
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintln(stdout, err.Error())
-		return flagErrorReturnCode(err)
+		return 1
+	}
+	err = validator(cmd)
+	if err != nil {
+		fmt.Fprintln(stdout, err.Error())
+		return 1
 	}
 	worker, err := workerFactory(cmd)
 	if err != nil {
@@ -40,20 +56,37 @@ func Execute(workerFactory WorkerFactory, accountantFactory AccountantFactory, a
 	return 0
 }
 
-func flagErrorReturnCode(err error) int {
-	ourErr, ok := err.(*flags.Error)
-	if ok && ourErr.Type == flags.ErrHelp {
-		return 0
+func parseArgs(args []string, out io.Writer) (Command, error) {
+	ftCmd := Command{}
+	cobraCmd := &cobra.Command{
+		Use:   "ft",
+		Short: "ft is an operator observability tool for concourse",
 	}
-	return 1
-}
+	var postgresCaCert, postgresClientCert, postgresClientKey string
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.K8sNamespace, "k8s-namespace", "", "Kubernetes namespace containing the worker pod to query")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.K8sPod, "k8s-pod", "", "Name of the worker pod to query")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Host, "postgres-host", "127.0.0.1", "The postgres host to connect to")
+	cobraCmd.PersistentFlags().Uint16Var(&ftCmd.Postgres.Port, "postgres-port", 5432, "The postgres port to connect to")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.User, "postgres-user", "", "The postgres user to sign in as")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Database, "postgres-database", "atc", "The postgres database to connect to")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Password, "postgres-password", "", "The postgres user's password")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.SSLMode, "postgres-sslmode", "disable", "Whether or not to use SSL when connecting to postgres")           // TODO choices in cobra - disable, require, verify-ca, verify-full
+	cobraCmd.PersistentFlags().StringVar(&postgresCaCert, "postgres-ca-cert", "", "CA cert file location, to verify when connecting to postgres with SSL")
+	cobraCmd.PersistentFlags().StringVar(&postgresClientCert, "postgres-client-cert", "", "Client cert file location, to use when connecting to postgres with SSL")
+	cobraCmd.PersistentFlags().StringVar(&postgresClientKey, "postgres-client-key", "", "Client key file location, to use when connecting to postgres with SSL")
 
-func parseArgs(args []string) (Command, error) {
-	cmd := Command{}
-	parser := flags.NewParser(&cmd, flags.HelpFlag|flags.PassDoubleDash)
-	parser.NamespaceDelimiter = "-"
-	_, err := parser.ParseArgs(args)
-	return cmd, err
+	cobraCmd.SetOut(out)
+	cobraCmd.InitDefaultHelpFlag()
+	err := cobraCmd.ParseFlags(args)
+	if helpVal, _ := cobraCmd.Flags().GetBool("help"); helpVal {
+		cobraCmd.HelpFunc()(cobraCmd, args)
+		cobraCmd.Println(cobraCmd.UsageString())
+		return ftCmd, pflag.ErrHelp
+	}
+	ftCmd.Postgres.CACert = flag.File(postgresCaCert)
+	ftCmd.Postgres.ClientCert = flag.File(postgresClientCert)
+	ftCmd.Postgres.ClientKey = flag.File(postgresClientKey)
+	return ftCmd, err
 }
 
 func printSamples(writer io.Writer, samples []Sample) error {

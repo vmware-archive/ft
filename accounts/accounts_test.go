@@ -12,6 +12,13 @@ import (
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 io.Writer
 
+var noopValidator = func(accounts.Command) error {
+	return nil
+}
+var noopAccountantFactory = func(accounts.Command) accounts.Accountant {
+	return nil
+}
+
 var _ = Describe("Accounts", func() {
 	Describe("#Execute", func() {
 		It("handles worker errors", func() {
@@ -22,9 +29,9 @@ var _ = Describe("Accounts", func() {
 			returnCode := accounts.Execute(
 				func(accounts.Command) (accounts.Worker, error) {
 					return fakeWorker, nil
-				}, func(accounts.Command) accounts.Accountant {
-					return nil
 				},
+				noopAccountantFactory,
+				noopValidator,
 				[]string{},
 				buf,
 			)
@@ -35,23 +42,79 @@ var _ = Describe("Accounts", func() {
 
 		It("prints help text when `-h` is passed", func() {
 			buf := gbytes.NewBuffer()
-			returnCode := accounts.Execute(nil, nil, []string{"-h"}, buf)
+			returnCode := accounts.Execute(
+				nil,
+				noopAccountantFactory,
+				noopValidator,
+				[]string{"-h"},
+				buf,
+			)
 			Expect(returnCode).To(Equal(0))
 			Expect(buf).To(gbytes.Say("Usage"))
 		})
 
 		It("fails on flag parsing errors", func() {
 			buf := gbytes.NewBuffer()
-			returnCode := accounts.Execute(nil, nil, []string{"--invalid-flag"}, buf)
+			returnCode := accounts.Execute(
+				nil,
+				noopAccountantFactory,
+				noopValidator,
+				[]string{"--invalid-flag"},
+				buf,
+			)
 			Expect(returnCode).To(Equal(1))
 			Expect(buf).To(gbytes.Say("invalid-flag"))
 		})
 
+		It("uses SSL flags to configure postgres connection", func() {
+			fakeWorker := new(accountsfakes.FakeWorker)
+			fakeWorker.ContainersReturns(nil, errors.New("no worker"))
+			var cmd accounts.Command
+
+			accounts.Execute(
+				func(accounts.Command) (accounts.Worker, error) {
+					return fakeWorker, nil
+				},
+				func(c accounts.Command) accounts.Accountant {
+					cmd = c
+					return nil
+				},
+				noopValidator,
+				[]string{"--postgres-client-cert", "/path/to/cert"},
+				gbytes.NewBuffer(),
+			)
+
+			Expect(cmd.Postgres.ClientCert.Path()).
+				To(Equal("/path/to/cert"))
+		})
+
+		It("validates flags", func() {
+			buf := gbytes.NewBuffer()
+			returnCode := accounts.Execute(
+				nil,
+				nil,
+				func(accounts.Command) error {
+					return errors.New("invalid flags")
+				},
+				[]string{},
+				buf,
+			)
+			Expect(returnCode).To(Equal(1))
+			Expect(buf).To(gbytes.Say("invalid flags"))
+		})
+
 		It("fails on kubectl errors", func() {
 			buf := gbytes.NewBuffer()
-			returnCode := accounts.Execute(func(accounts.Command) (accounts.Worker, error) {
-				return nil, errors.New("error loading config file")
-			}, nil, []string{}, buf)
+			returnCode := accounts.Execute(
+				func(accounts.Command) (accounts.Worker, error) {
+					return nil,
+						errors.New("error loading config file")
+				},
+				noopAccountantFactory,
+				noopValidator,
+				[]string{},
+				buf,
+			)
 
 			Expect(returnCode).To(Equal(1))
 			Expect(buf).To(gbytes.Say("configuration error: error loading config file\n"))
@@ -75,6 +138,7 @@ var _ = Describe("Accounts", func() {
 				}, func(accounts.Command) accounts.Accountant {
 					return fakeAccountant
 				},
+				noopValidator,
 				[]string{},
 				buf,
 			)
@@ -106,6 +170,7 @@ var _ = Describe("Accounts", func() {
 				}, func(accounts.Command) accounts.Accountant {
 					return fakeAccountant
 				},
+				noopValidator,
 				[]string{},
 				fakeWriter,
 			)

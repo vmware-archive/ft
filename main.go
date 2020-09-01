@@ -12,6 +12,7 @@ func main() {
 	returnCode := accounts.Execute(
 		accounts.DefaultWorkerFactory,
 		accounts.DefaultAccountantFactory,
+		accounts.DefaultValidator,
 		os.Args[1:],
 		os.Stdout,
 	)

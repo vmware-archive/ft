@@ -15,12 +15,13 @@ require (
 	github.com/cppforlife/go-semi-semantic v0.0.0-20160921010311-576b6af77ae4
 	github.com/fatih/color v1.7.0
 	github.com/go-sql-driver/mysql v1.4.1 // indirect
-	github.com/jessevdk/go-flags v1.4.0
 	github.com/mattn/go-sqlite3 v1.11.0 // indirect
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.2.3
 	github.com/onsi/ginkgo v1.13.0
 	github.com/onsi/gomega v1.10.1
 	github.com/patrickmn/go-cache v2.1.0+incompatible
+	github.com/spf13/cobra v1.0.0
+	github.com/spf13/pflag v1.0.5
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
 	google.golang.org/genproto v0.0.0-20200108215221-bd8f9a0ef82f // indirect
 	k8s.io/api v0.18.6
