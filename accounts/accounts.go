@@ -9,6 +9,7 @@ import (
 	"github.com/concourse/concourse/fly/ui"
 	"github.com/fatih/color"
 	"github.com/jessevdk/go-flags"
+	"github.com/spf13/cobra"
 )
 
 func Execute(workerFactory WorkerFactory, accountantFactory AccountantFactory, args []string, stdout io.Writer) int {
@@ -49,11 +50,33 @@ func flagErrorReturnCode(err error) int {
 }
 
 func parseArgs(args []string) (Command, error) {
-	cmd := Command{}
-	parser := flags.NewParser(&cmd, flags.HelpFlag|flags.PassDoubleDash)
-	parser.NamespaceDelimiter = "-"
-	_, err := parser.ParseArgs(args)
-	return cmd, err
+	ftCmd := Command{}
+	// create cobra.Command
+	cobraCmd := &cobra.Command{
+		Use:   "ft",
+		Short: "ft is an operator observability tool for concourse",
+	}
+	var postgresCaCert, postgresClientCert, postgresClientKey string
+	// define flags
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.K8sNamespace, "k8s-namespace", "", "Kubernetes namespace containing the worker pod to query")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.K8sPod, "k8s-pod", "", "Name of the worker pod to query")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Host, "postgres-host", "127.0.0.1", "The postgres host to connect to")
+	cobraCmd.PersistentFlags().Uint16Var(&ftCmd.Postgres.Port, "postgres-port", 5432, "The postgres port to connect to") // TODO uint16
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.User, "postgres-user", "", "The postgres user to sign in as")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Database, "postgres-database", "atc", "The postgres database to connect to")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Password, "postgres-password", "", "The postgres user's password")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.SSLMode, "postgres-sslmode", "disable", "Whether or not to use SSL when connecting to postgres") // TODO choices in cobra - disable, require, verify-ca, verify-full
+	cobraCmd.PersistentFlags().StringVar(&postgresCaCert, "postgres-ca-cert", "", "CA cert file location, to verify when connecting to postgres with SSL") // TODO flag.File
+	cobraCmd.PersistentFlags().StringVar(&postgresClientCert, "postgres-client-cert", "", "Client cert file location, to use when connecting to postgres with SSL") // TODO flag.File
+	cobraCmd.PersistentFlags().StringVar(&postgresClientKey, "postgres-client-key", "", "Client key file location, to use when connecting to postgres with SSL") // TODO flag.File
+
+	// call Execute on cobra.Command
+	// populate our own Command struct from there
+
+	// parser := flags.NewParser(&cmd, flags.HelpFlag|flags.PassDoubleDash)
+	// parser.NamespaceDelimiter = "-"
+	// _, err := parser.ParseArgs(args)
+	return ftCmd, nil
 }
 
 func printSamples(writer io.Writer, samples []Sample) error {
