@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"time"
 
 	"code.cloudfoundry.org/garden"
@@ -31,12 +30,278 @@ import (
 	"github.com/concourse/concourse/atc/worker"
 	"github.com/concourse/concourse/atc/worker/gclient"
 	"github.com/concourse/concourse/atc/worker/gclient/gclientfakes"
-	"github.com/concourse/ft/accounts"
 	"github.com/concourse/flag"
+	"github.com/concourse/ft/accounts"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	gocache "github.com/patrickmn/go-cache"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 )
+
+type AccountantSuite struct {
+	suite.Suite
+	*require.Assertions
+	dbConn        db.Conn
+	lockConn      *sql.DB
+	lockFactory   lock.LockFactory
+	teamFactory   db.TeamFactory
+	workerFactory db.WorkerFactory
+	team          db.Team
+}
+
+func testDBName() string {
+	return "testdb"
+}
+
+func dbHost() string {
+	if val, exists := os.LookupEnv("DB_HOST"); exists {
+		return val
+	}
+	return "127.0.0.1"
+}
+
+func dataSource() string {
+	return fmt.Sprintf(
+		"host=%s user=postgres password=password sslmode=disable port=5432",
+		dbHost(),
+	)
+}
+
+func dropTestDB() error {
+	conn, err := sql.Open("postgres", dataSource())
+	defer conn.Close()
+	// Expect(err).NotTo(HaveOccurred())
+	_, err = conn.Exec("DROP DATABASE " + testDBName())
+	return err
+}
+
+func createTestDB() error {
+	conn, err := sql.Open("postgres", dataSource())
+	defer conn.Close()
+	// Expect(err).NotTo(HaveOccurred())
+	_, err = conn.Exec("CREATE DATABASE " + testDBName())
+	return err
+}
+
+func (s *AccountantSuite) SetupTest() {
+	if createTestDB() != nil {
+		Expect(dropTestDB()).To(Succeed())
+		Expect(createTestDB()).To(Succeed())
+	}
+
+	datasourceName := fmt.Sprintf("host=%s user=postgres password=password dbname=%s sslmode=disable port=5432", dbHost(), testDBName())
+	var err error
+	s.dbConn, err = db.Open(
+		lagertest.NewTestLogger("postgres"),
+		"postgres",
+		datasourceName,
+		nil,
+		nil,
+		"postgresrunner",
+		nil,
+	)
+	s.NoError(err)
+	s.lockConn, err = sql.Open("postgres", datasourceName)
+	s.NoError(err)
+	s.lockFactory = lock.NewLockFactory(
+		s.lockConn,
+		metric.LogLockAcquired,
+		metric.LogLockReleased,
+	)
+	s.teamFactory = db.NewTeamFactory(s.dbConn, s.lockFactory)
+	s.workerFactory = db.NewWorkerFactory(s.dbConn)
+	s.team, _ = s.teamFactory.CreateDefaultTeamIfNotExists()
+}
+
+func (s *AccountantSuite) TeardownTest() {
+	s.dbConn.Close()
+	s.lockConn.Close()
+	dropTestDB()
+}
+
+func (s *AccountantSuite) registerWorker() {
+	s.workerFactory.SaveWorker(atc.Worker{
+		Platform: "linux",
+		Version:  "0.0.0-dev",
+		Name:     "worker",
+		ResourceTypes: []atc.WorkerResourceType{{
+			Type: "git",
+		}},
+	}, 10*time.Second)
+}
+
+func (s *AccountantSuite) createResources(rs atc.ResourceConfigs) {
+	plan := []atc.Step{}
+	for _, r := range rs {
+		plan = append(plan, atc.Step{Config: &atc.GetStep{Name: r.Name}})
+	}
+	_, _, err := s.team.SavePipeline(
+		"p",
+		atc.Config{
+			Resources: rs,
+			Jobs: atc.JobConfigs{
+				{
+					Name:         "some-job",
+					PlanSequence: plan,
+				},
+			},
+		},
+		0,
+		false,
+	)
+	s.NoError(err)
+}
+
+func (s *AccountantSuite) testEngine(gclient gclient.Client, bclient baggageclaim.Client) engine.Engine {
+	compressionLib := compression.NewGzipCompression()
+
+	workerProvider := testWorkerProvider(
+		s.dbConn,
+		s.lockFactory,
+		compressionLib,
+		gclient,
+		bclient,
+	)
+	pool := worker.NewPool(workerProvider)
+	cpu := uint64(1024)
+	mem := uint64(1024)
+	defaultLimits := atc.ContainerLimits{
+		CPU:    &cpu,
+		Memory: &mem,
+	}
+	stepFactory := builder.NewStepFactory(
+		pool,
+		worker.NewClient(
+			pool,
+			workerProvider,
+			compressionLib,
+			10*time.Second,
+			10*time.Second,
+		),
+		resource.NewResourceFactory(),
+		s.teamFactory,
+		db.NewBuildFactory(s.dbConn, s.lockFactory, 24*time.Hour, 24*time.Hour),
+		db.NewResourceCacheFactory(s.dbConn, s.lockFactory),
+		db.NewResourceConfigFactory(s.dbConn, s.lockFactory),
+		defaultLimits,
+		worker.NewVolumeLocalityPlacementStrategy(),
+		s.lockFactory,
+		false,
+	)
+	return engine.NewEngine(
+		builder.NewStepBuilder(
+			stepFactory,
+			builder.NewDelegateFactory(),
+			"external-url",
+			new(credsfakes.FakeSecrets),
+			new(credsfakes.FakeVarSourcePool),
+			false,
+		),
+	)
+}
+
+func (s *AccountantSuite) checkResources() {
+	fakeGClient := new(gclientfakes.FakeClient)
+	fakeGClientContainer := new(gclientfakes.FakeContainer)
+	fakeGClientContainer.RunStub = func(ctx context.Context, ps garden.ProcessSpec, pi garden.ProcessIO) (garden.Process, error) {
+		fakeProcess := new(gardenfakes.FakeProcess)
+		fakeProcess.WaitStub = func() (int, error) {
+			io.WriteString(pi.Stdout, "[]")
+			return 0, nil
+		}
+		return fakeProcess, nil
+	}
+	fakeGClient.CreateReturns(fakeGClientContainer, nil)
+	fakeBaggageclaimClient := new(baggageclaimfakes.FakeClient)
+	fakeBaggageclaimVolume := new(baggageclaimfakes.FakeVolume)
+	fakeBaggageclaimVolume.PathReturns("/path/to/fake/volume")
+	fakeBaggageclaimClient.LookupVolumeReturns(fakeBaggageclaimVolume, true, nil)
+
+	engine := s.testEngine(fakeGClient, fakeBaggageclaimClient)
+	checkFactory := db.NewCheckFactory(
+		s.dbConn,
+		s.lockFactory,
+		new(credsfakes.FakeSecrets),
+		new(credsfakes.FakeVarSourcePool),
+		1*time.Hour,
+	)
+	logger := lagertest.NewTestLogger("test")
+
+	// insert checks
+	lidar.NewScanner(
+		logger,
+		checkFactory,
+		new(credsfakes.FakeSecrets),
+		1*time.Hour,
+		10*time.Second,
+		1*time.Minute,
+	).Run(context.TODO())
+	// run the checks
+	lidar.NewChecker(
+		logger,
+		checkFactory,
+		engine,
+		lidar.CheckRateCalculator{
+			MaxChecksPerSecond:       -1,
+			ResourceCheckingInterval: 10 * time.Second,
+			CheckableCounter:         db.NewCheckableCounter(s.dbConn),
+		},
+	).Run(context.TODO())
+}
+
+func (s *AccountantSuite) TestAccountsForResourceCheckContainers() {
+	atc.EnableGlobalResources = true
+	// register a worker with "git" resource type
+	s.registerWorker()
+	resources := atc.ResourceConfigs{
+		{
+			Name:   "r",
+			Type:   "git",
+			Source: atc.Source{"some": "repository"},
+		},
+		{
+			Name:   "s",
+			Type:   "git",
+			Source: atc.Source{"some": "repository"},
+		},
+	}
+	s.createResources(resources)
+	s.checkResources()
+	accountant := &accounts.DBAccountant{
+		PostgresConfig: flag.PostgresConfig{
+			Host:     dbHost(),
+			Port:     5432,
+			User:     "postgres",
+			Password: "password",
+			Database: testDBName(),
+			SSLMode:  "disable",
+		},
+	}
+	s.Eventually(
+		func() bool {
+			cs, _ := s.team.Containers()
+			return len(cs) > 0
+		},
+		1*time.Second,
+		10*time.Second,
+	)
+	// Eventually(team.Containers).ShouldNot(BeEmpty())
+	containers := []accounts.Container{}
+	dbContainers, _ := s.team.Containers()
+	for _, container := range dbContainers {
+		containers = append(containers, accounts.Container{Handle: container.Handle()})
+	}
+	samples, err := accountant.Account(containers)
+	s.NoError(err)
+	workloadStrings := []string{}
+	for _, workload := range samples[0].Labels.Workloads {
+		workloadStrings = append(workloadStrings, workload.ToString())
+	}
+	s.Contains(workloadStrings, "main/p/r")
+	s.Contains(workloadStrings, "main/p/s")
+	s.Equal(samples[0].Labels.Type, db.ContainerTypeCheck)
+}
 
 var _ = Describe("DBAccountant", func() {
 	var (
@@ -47,40 +312,6 @@ var _ = Describe("DBAccountant", func() {
 		workerFactory db.WorkerFactory
 		team          db.Team
 	)
-
-	testDBName := func() string {
-		return "testdb" + strconv.Itoa(GinkgoParallelNode())
-	}
-
-	dbHost := func() string {
-		if val, exists := os.LookupEnv("DB_HOST"); exists {
-			return val
-		}
-		return "127.0.0.1"
-	}
-
-	dataSource := func() string {
-		return fmt.Sprintf(
-			"host=%s user=postgres password=password sslmode=disable port=5432",
-			dbHost(),
-		)
-	}
-
-	dropTestDB := func() error {
-		conn, err := sql.Open("postgres", dataSource())
-		defer conn.Close()
-		Expect(err).NotTo(HaveOccurred())
-		_, err = conn.Exec("DROP DATABASE " + testDBName())
-		return err
-	}
-
-	createTestDB := func() error {
-		conn, err := sql.Open("postgres", dataSource())
-		defer conn.Close()
-		Expect(err).NotTo(HaveOccurred())
-		_, err = conn.Exec("CREATE DATABASE " + testDBName())
-		return err
-	}
 
 	BeforeEach(func() {
 		if createTestDB() != nil {
