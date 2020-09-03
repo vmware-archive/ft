@@ -35,13 +35,12 @@ type LANWorkerSuite struct {
 
 func (s *LANWorkerSuite) SetupTest() {
 	s.backend = new(gardenfakes.FakeBackend)
-	logger := lagertest.NewTestLogger("test")
 	s.gardenServer = server.New(
 		"tcp",
 		"127.0.0.1:7777",
 		0,
 		s.backend,
-		logger,
+		lagertest.NewTestLogger("test"),
 	)
 	s.listener, _ = net.Listen("tcp", "127.0.0.1:7777")
 	go s.gardenServer.Serve(s.listener)

@@ -284,14 +284,14 @@ func (s *AccountantSuite) TestAccountsForResourceCheckContainers() {
 	s.createResources(resources)
 	s.checkResources()
 	accountant := &accounts.DBAccountant{
-		PostgresConfig: flag.PostgresConfig{
+		Opener: &accounts.StaticPostgresOpener{flag.PostgresConfig{
 			Host:     dbHost(),
 			Port:     5432,
 			User:     "postgres",
 			Password: "password",
 			Database: testDBName(),
 			SSLMode:  "disable",
-		},
+		}},
 	}
 	s.Eventually(
 		func() bool {
@@ -408,14 +408,14 @@ func (s *AccountantSuite) TestAccountsForJobBuildContainers() {
 	// TODO wait for build to complete?
 
 	accountant := &accounts.DBAccountant{
-		PostgresConfig: flag.PostgresConfig{
+		Opener: &accounts.StaticPostgresOpener{flag.PostgresConfig{
 			Host:     dbHost(),
 			Port:     5432,
 			User:     "postgres",
 			Password: "password",
 			Database: testDBName(),
 			SSLMode:  "disable",
-		},
+		}},
 	}
 	s.Eventually(
 		func() bool {

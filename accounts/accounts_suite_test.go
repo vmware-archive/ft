@@ -20,4 +20,7 @@ func TestAccounts(t *testing.T) {
 	suite.Run(t, &K8sGardenDialerSuite{
 		Assertions: require.New(t),
 	})
+	suite.Run(t, &PostgresOpenerSuite{
+		Assertions: require.New(t),
+	})
 }
