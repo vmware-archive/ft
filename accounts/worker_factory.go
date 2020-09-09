@@ -1,15 +1,5 @@
 package accounts
 
-import (
-	"github.com/concourse/flag"
-)
-
-type Command struct {
-	Postgres     flag.PostgresConfig `group:"PostgreSQL Configuration" namespace:"postgres"`
-	K8sNamespace string              `long:"k8s-namespace"`
-	K8sPod       string              `long:"k8s-pod"`
-}
-
 type WorkerFactory func(Command) (Worker, error)
 
 var DefaultWorkerFactory WorkerFactory = func(cmd Command) (Worker, error) {

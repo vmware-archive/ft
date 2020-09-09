@@ -13,6 +13,14 @@ import (
 	"github.com/spf13/pflag"
 )
 
+type Command struct {
+	Postgres        flag.PostgresConfig
+	K8sNamespace    string
+	K8sPod          string
+	WebK8sNamespace string
+	WebK8sPod       string
+}
+
 func Execute(
 	workerFactory WorkerFactory,
 	accountantFactory AccountantFactory,
@@ -38,7 +46,11 @@ func Execute(
 		fmt.Fprintf(stdout, "configuration error: %s\n", err.Error())
 		return 1
 	}
-	accountant := accountantFactory(cmd)
+	accountant, err := accountantFactory(cmd)
+	if err != nil {
+		fmt.Fprintf(stdout, "configuration error: %s\n", err.Error())
+		return 1
+	}
 	containers, err := worker.Containers()
 	if err != nil {
 		fmt.Fprintf(stdout, "worker error: %s\n", err.Error())
@@ -65,12 +77,14 @@ func parseArgs(args []string, out io.Writer) (Command, error) {
 	var postgresCaCert, postgresClientCert, postgresClientKey string
 	cobraCmd.PersistentFlags().StringVar(&ftCmd.K8sNamespace, "k8s-namespace", "", "Kubernetes namespace containing the worker pod to query")
 	cobraCmd.PersistentFlags().StringVar(&ftCmd.K8sPod, "k8s-pod", "", "Name of the worker pod to query")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.WebK8sNamespace, "web-k8s-namespace", "", "Kubernetes namespace containing the web pod to inpect for connection information")
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.WebK8sPod, "web-k8s-pod", "", "Name of the web pod to inspect for connection information")
 	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Host, "postgres-host", "127.0.0.1", "The postgres host to connect to")
 	cobraCmd.PersistentFlags().Uint16Var(&ftCmd.Postgres.Port, "postgres-port", 5432, "The postgres port to connect to")
 	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.User, "postgres-user", "", "The postgres user to sign in as")
 	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Database, "postgres-database", "atc", "The postgres database to connect to")
 	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.Password, "postgres-password", "", "The postgres user's password")
-	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.SSLMode, "postgres-sslmode", "disable", "Whether or not to use SSL when connecting to postgres")           // TODO choices in cobra - disable, require, verify-ca, verify-full
+	cobraCmd.PersistentFlags().StringVar(&ftCmd.Postgres.SSLMode, "postgres-sslmode", "disable", "Whether or not to use SSL when connecting to postgres") // TODO choices in cobra - disable, require, verify-ca, verify-full
 	cobraCmd.PersistentFlags().StringVar(&postgresCaCert, "postgres-ca-cert", "", "CA cert file location, to verify when connecting to postgres with SSL")
 	cobraCmd.PersistentFlags().StringVar(&postgresClientCert, "postgres-client-cert", "", "Client cert file location, to use when connecting to postgres with SSL")
 	cobraCmd.PersistentFlags().StringVar(&postgresClientKey, "postgres-client-key", "", "Client key file location, to use when connecting to postgres with SSL")

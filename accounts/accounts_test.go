@@ -20,8 +20,11 @@ type AccountsSuite struct {
 var noopValidator = func(accounts.Command) error {
 	return nil
 }
-var noopAccountantFactory = func(accounts.Command) accounts.Accountant {
-	return nil
+var noopWorkerFactory = func(accounts.Command) (accounts.Worker, error) {
+	return nil, nil
+}
+var noopAccountantFactory = func(accounts.Command) (accounts.Accountant, error) {
+	return nil, nil
 }
 
 func (s *AccountsSuite) TestHandlesWorkerErrors() {
@@ -46,7 +49,7 @@ func (s *AccountsSuite) TestHandlesWorkerErrors() {
 func (s *AccountsSuite) TestPrintsUsageWhenHelpFlagIsPassed() {
 	buf := bytes.NewBuffer([]byte{})
 	returnCode := accounts.Execute(
-		nil,
+		noopWorkerFactory,
 		noopAccountantFactory,
 		noopValidator,
 		[]string{"-h"},
@@ -59,7 +62,7 @@ func (s *AccountsSuite) TestPrintsUsageWhenHelpFlagIsPassed() {
 func (s *AccountsSuite) TestFailsOnFlagParsingErrors() {
 	buf := bytes.NewBuffer([]byte{})
 	returnCode := accounts.Execute(
-		nil,
+		noopWorkerFactory,
 		noopAccountantFactory,
 		noopValidator,
 		[]string{"--invalid-flag"},
@@ -78,9 +81,9 @@ func (s *AccountsSuite) TestUsesSSLFlagsToConfigurePostgresConnection() {
 		func(accounts.Command) (accounts.Worker, error) {
 			return fakeWorker, nil
 		},
-		func(c accounts.Command) accounts.Accountant {
+		func(c accounts.Command) (accounts.Accountant, error) {
 			cmd = c
-			return nil
+			return nil, nil
 		},
 		noopValidator,
 		[]string{"--postgres-client-cert", "/path/to/cert"},
@@ -94,8 +97,8 @@ func (s *AccountsSuite) TestRunsValidatorAgainstFlags() {
 	buf := bytes.NewBuffer([]byte{})
 
 	returnCode := accounts.Execute(
-		nil,
-		nil,
+		noopWorkerFactory,
+		noopAccountantFactory,
 		func(accounts.Command) error {
 			return errors.New("invalid flags")
 		},
@@ -124,6 +127,23 @@ func (s *AccountsSuite) TestFailsOnKubectlErrors() {
 	s.Contains(buf.String(), "configuration error: error loading config file\n")
 }
 
+func (s *AccountsSuite) TestFailsOnAccountantFactoryKubectlErrors() {
+	buf := bytes.NewBuffer([]byte{})
+
+	returnCode := accounts.Execute(
+		noopWorkerFactory,
+		func(accounts.Command) (accounts.Accountant, error) {
+			return nil, errors.New("error loading config file")
+		},
+		noopValidator,
+		[]string{},
+		buf,
+	)
+
+	s.Equal(returnCode, 1)
+	s.Contains(buf.String(), "configuration error: error loading config file\n")
+}
+
 func (s *AccountsSuite) TestFailsOnAccountantErrors() {
 	buf := bytes.NewBuffer([]byte{})
 	fakeWorker := new(accountsfakes.FakeWorker)
@@ -139,8 +159,8 @@ func (s *AccountsSuite) TestFailsOnAccountantErrors() {
 	returnCode := accounts.Execute(
 		func(accounts.Command) (accounts.Worker, error) {
 			return fakeWorker, nil
-		}, func(accounts.Command) accounts.Accountant {
-			return fakeAccountant
+		}, func(accounts.Command) (accounts.Accountant, error) {
+			return fakeAccountant, nil
 		},
 		noopValidator,
 		[]string{},
@@ -171,8 +191,8 @@ func (s *AccountsSuite) TestFailsOnTerminalIOErrors() {
 	returnCode := accounts.Execute(
 		func(accounts.Command) (accounts.Worker, error) {
 			return fakeWorker, nil
-		}, func(accounts.Command) accounts.Accountant {
-			return fakeAccountant
+		}, func(accounts.Command) (accounts.Accountant, error) {
+			return fakeAccountant, nil
 		},
 		noopValidator,
 		[]string{},
