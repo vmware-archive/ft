@@ -14,9 +14,11 @@ var DefaultAccountantFactory = func(cmd Command) (Accountant, error) {
 			return nil, err
 		}
 		opener = &K8sWebNodeInferredPostgresOpener{
-			RESTConfig: restConfig,
-			Namespace:  cmd.WebK8sNamespace,
-			PodName:    cmd.WebK8sPod,
+			K8sClient: &k8sClient{
+				RESTConfig: restConfig,
+				Namespace:  cmd.WebK8sNamespace,
+			},
+			PodName: cmd.WebK8sPod,
 		}
 	} else {
 		opener = &StaticPostgresOpener{cmd.Postgres}

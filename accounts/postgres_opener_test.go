@@ -22,57 +22,47 @@ type PostgresOpenerSuite struct {
 	*require.Assertions
 }
 
-func (s *PostgresOpenerSuite) TestInfersHostFromWebNode() {
-	// stub k8s client such that web node has
-	// 	CONCOURSE_POSTGRES_HOST=<local listener>
-	namespace := "namespace"
-	podName := "pod-name"
-	podSpec := corev1.PodSpec{
-		RestartPolicy: corev1.RestartPolicyAlways,
-		DNSPolicy:     corev1.DNSClusterFirst,
-		Containers: []corev1.Container{
-			{
-				Name: "helm-release-web",
-				Env: []corev1.EnvVar{
-					{
-						Name:  "CONCOURSE_POSTGRES_HOST",
-						Value: dbHost(),
-					},
-					{
-						Name:  "CONCOURSE_POSTGRES_PORT",
-						Value: "5432",
-					},
-					{
-						Name:  "CONCOURSE_POSTGRES_USER",
-						Value: "postgres",
-					},
-					{
-						Name:  "CONCOURSE_POSTGRES_PASSWORD",
-						Value: "password",
-					},
-				},
+type testk8sClient struct {
+	pod     accounts.WebPod
+	secrets map[string]map[string]string
+}
+
+func (tkc *testk8sClient) GetPod(name string) (accounts.WebPod, error) {
+	return tkc.pod, nil
+}
+
+func (tkc *testk8sClient) GetSecret(name, key string) (string, error) {
+	return tkc.secrets[name][key], nil
+}
+
+func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{
+			pod: &testWebPod{
+				name:     "helm-release-web",
+				host:     dbHost(),
+				port:     "5432",
+				user:     "postgres",
+				password: "password",
 			},
 		},
+		PodName: "pod-name",
 	}
 
-	// construct K8sWebNodeInferredPostgresOpener
-	//	with above k8s client
-	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	db, err := opener.Open()
+	s.NoError(err)
+	err = db.Ping()
+	s.NoError(err)
+}
+
+func (s *PostgresOpenerSuite) fakeAPI(path string, obj runtime.Object) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch p, m := r.URL.Path, r.Method; {
-		case p == "/api/v1/namespaces/"+namespace+"/pods/"+podName && m == "GET":
+		case p == path && m == "GET":
 			body := cmdtesting.ObjBody(
 				scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...),
-				&corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            podName,
-						Namespace:       namespace,
-						ResourceVersion: "10",
-					},
-					Spec: podSpec,
-					Status: corev1.PodStatus{
-						Phase: corev1.PodRunning,
-					},
-				})
+				obj,
+			)
 			for k, vals := range cmdtesting.DefaultHeader() {
 				for _, v := range vals {
 					w.Header().Add(k, v)
@@ -83,25 +73,119 @@ func (s *PostgresOpenerSuite) TestInfersHostFromWebNode() {
 			s.Failf("unexpected request", "%#v\n%#v", r.URL, r)
 		}
 	}))
-	defer fakeAPI.Close()
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		RESTConfig: &restclient.Config{
-			Host:    fakeAPI.URL,
-			APIPath: "/api",
-			ContentConfig: restclient.ContentConfig{
-				NegotiatedSerializer: scheme.Codecs,
-				ContentType:          runtime.ContentTypeJSON,
-				GroupVersion:         &corev1.SchemeGroupVersion,
+}
+
+// TODO split out a separate k8s-related suite
+func (s *PostgresOpenerSuite) TestGetPodFindsPod() {
+	namespace := "namespace"
+	podName := "pod-name"
+	podSpec := corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyAlways,
+		DNSPolicy:     corev1.DNSClusterFirst,
+		Containers: []corev1.Container{
+			{
+				Name: "helm-release-web",
 			},
 		},
-		Namespace: namespace,
-		PodName:   podName,
 	}
-	// Call Open() on the opener
-	db, err := opener.Open()
+	fakeAPI := s.fakeAPI(
+		"/api/v1/namespaces/"+namespace+"/pods/"+podName,
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            podName,
+				Namespace:       namespace,
+				ResourceVersion: "10",
+			},
+			Spec: podSpec,
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+			},
+		},
+	)
+	defer fakeAPI.Close()
+	restConfig := &restclient.Config{
+		Host:    fakeAPI.URL,
+		APIPath: "/api",
+		ContentConfig: restclient.ContentConfig{
+			NegotiatedSerializer: scheme.Codecs,
+			ContentType:          runtime.ContentTypeJSON,
+			GroupVersion:         &corev1.SchemeGroupVersion,
+		},
+	}
+	client := accounts.NewK8sClient(restConfig, namespace)
+
+	pod, err := client.GetPod(podName)
 	s.NoError(err)
-	err = db.Ping()
+	s.Equal(pod.Name(), podName)
+}
+
+func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
+	secretName := "secret-name"
+	secretKey := "postgresql-user"
+	secretKeyRef := &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{
+			Name: secretName,
+		},
+		Key: secretKey,
+	}
+	env := []corev1.EnvVar{
+		{
+			Name: "CONCOURSE_POSTGRES_USER",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: secretKeyRef,
+			},
+		},
+	}
+	pod := &accounts.K8sWebPod{
+		&corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "helm-release-web",
+						Env:  env,
+					},
+				},
+			},
+		},
+	}
+
+	userParam, err := pod.PostgresParam("user")
 	s.NoError(err)
+	userParamValue, err := userParam(&testk8sClient{
+		secrets: map[string]map[string]string{
+			secretName: map[string]string{
+				secretKey: "username",
+			},
+		},
+	})
+	s.Equal(userParamValue, "username")
+}
+
+func (s *PostgresOpenerSuite) TestK8sClientLooksUpSecrets() {
+	namespace := "namespace"
+	secretName := "secret-name"
+	fakeAPI := s.fakeAPI(
+		"/api/v1/namespaces/"+namespace+"/secrets/"+secretName,
+		&corev1.Secret{
+			Data: map[string][]byte{
+				"postgresql-user": []byte("user"),
+			},
+		},
+	)
+	defer fakeAPI.Close()
+	restConfig := &restclient.Config{
+		Host:    fakeAPI.URL,
+		APIPath: "/api",
+		ContentConfig: restclient.ContentConfig{
+			NegotiatedSerializer: scheme.Codecs,
+			ContentType:          runtime.ContentTypeJSON,
+			GroupVersion:         &corev1.SchemeGroupVersion,
+		},
+	}
+	client := accounts.NewK8sClient(restConfig, namespace)
+	val, err := client.GetSecret(secretName, "postgresql-user")
+	s.NoError(err)
+	s.Equal(val, "user")
 }
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithNoContainers() {
@@ -184,7 +268,7 @@ type testWebPod struct {
 	password string
 }
 
-func (twp *testWebPod) PostgresParam(param string) (string, error) {
+func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 	var val string
 	switch param {
 	case "host":
@@ -197,9 +281,10 @@ func (twp *testWebPod) PostgresParam(param string) (string, error) {
 		val = twp.password
 	}
 	if val == "" {
-		return val, errors.New("foobar")
+		return func(accounts.K8sClient) (string, error) { return val, nil },
+			errors.New("foobar")
 	}
-	return val, nil
+	return func(accounts.K8sClient) (string, error) { return val, nil }, nil
 }
 
 func (twp *testWebPod) Name() string {
@@ -212,7 +297,11 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingHost() {
 		user:     "user",
 		password: "password",
 	}
-	_, err := accounts.ConnectionString(pod)
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+	_, err := opener.ConnectionString(pod)
 	s.Error(err)
 }
 
@@ -222,7 +311,11 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingUser() {
 		host:     "host",
 		password: "password",
 	}
-	_, err := accounts.ConnectionString(pod)
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+	_, err := opener.ConnectionString(pod)
 	s.Error(err)
 }
 
@@ -232,7 +325,11 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingPassword() {
 		host: "host",
 		user: "user",
 	}
-	_, err := accounts.ConnectionString(pod)
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+	_, err := opener.ConnectionString(pod)
 	s.Error(err)
 }
 
@@ -243,7 +340,11 @@ func (s *PostgresOpenerSuite) TestOmitsPortWhenUnspecified() {
 		user:     "postgres",
 		password: "password",
 	}
-	connectionString, err := accounts.ConnectionString(pod)
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+	connectionString, err := opener.ConnectionString(pod)
 	s.NoError(err)
 	s.Equal(
 		connectionString,
