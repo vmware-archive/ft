@@ -3,6 +3,7 @@ package accounts_test
 import (
 	"errors"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 
@@ -161,6 +162,61 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
 	s.Equal(userParamValue, "username")
 }
 
+func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
+	secretName := "secret-name"
+	secretKey := "postgresql-ca-cert"
+	volumeName := "keys-volume"
+	container := corev1.Container{
+		Name: "helm-release-web",
+		Env: []corev1.EnvVar{
+			{
+				Name:  "CONCOURSE_POSTGRES_CA_CERT",
+				Value: "/postgres-keys/ca.cert",
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      volumeName,
+				MountPath: "/postgres-keys",
+			},
+		},
+	}
+	volume := corev1.Volume{Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+				Items: []corev1.KeyToPath{
+					{
+						Key:  secretKey,
+						Path: "ca.cert",
+					},
+				},
+			},
+		},
+	}
+	pod := &accounts.K8sWebPod{
+		&corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{container},
+				Volumes:    []corev1.Volume{volume},
+			},
+		},
+	}
+
+	caCertParam, err := pod.PostgresParam("sslrootcert")
+	s.NoError(err)
+	caCertParamValue, err := caCertParam(&testk8sClient{
+		secrets: map[string]map[string]string{
+			secretName: map[string]string{
+				secretKey: "ssl cert",
+			},
+		},
+	})
+	contents, err := ioutil.ReadFile(caCertParamValue)
+	s.NoError(err)
+	s.Equal(string(contents), "ssl cert")
+}
+
 func (s *PostgresOpenerSuite) TestK8sClientLooksUpSecrets() {
 	namespace := "namespace"
 	secretName := "secret-name"
@@ -266,6 +322,7 @@ type testWebPod struct {
 	port     string
 	user     string
 	password string
+	sslmode  string
 }
 
 func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
@@ -279,10 +336,11 @@ func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 		val = twp.user
 	case "password":
 		val = twp.password
+	case "sslmode":
+		val = twp.sslmode
 	}
 	if val == "" {
-		return func(accounts.K8sClient) (string, error) { return val, nil },
-			errors.New("foobar")
+		return nil, errors.New("foobar")
 	}
 	return func(accounts.K8sClient) (string, error) { return val, nil }, nil
 }
@@ -349,5 +407,25 @@ func (s *PostgresOpenerSuite) TestOmitsPortWhenUnspecified() {
 	s.Equal(
 		connectionString,
 		"host=1.2.3.4 user=postgres password=password sslmode=disable",
+	)
+}
+
+func (s *PostgresOpenerSuite) TestReadsSSLMode() {
+	pod := &testWebPod{
+		name:     "web",
+		host:     "1.2.3.4",
+		user:     "postgres",
+		password: "password",
+		sslmode:  "verify-ca",
+	}
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+	connectionString, err := opener.ConnectionString(pod)
+	s.NoError(err)
+	s.Equal(
+		connectionString,
+		"host=1.2.3.4 user=postgres password=password sslmode=verify-ca",
 	)
 }

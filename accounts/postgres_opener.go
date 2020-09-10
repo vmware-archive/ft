@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -111,6 +112,13 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) ConnectionString(
 	if err != nil {
 		return "", err
 	}
+	conn.Append("sslrootcert", pod)
+	conn.Append("sslkey", pod)
+	conn.Append("sslcert", pod)
+	err = conn.Append("sslmode", pod)
+	if err != nil {
+		conn.parts = append(conn.parts, "sslmode=disable")
+	}
 	return conn.String(), nil
 }
 
@@ -133,7 +141,7 @@ func (pc *postgresConnection) Append(paramName string, pod WebPod) error {
 }
 
 func (pc *postgresConnection) String() string {
-	return strings.Join(append(pc.parts, "sslmode=disable"), " ")
+	return strings.Join(pc.parts, " ")
 }
 
 type K8sWebPod struct {
@@ -147,22 +155,11 @@ func (wp *K8sWebPod) PostgresParam(paramName string) (Parameter, error) {
 	if err != nil {
 		return nil, err
 	}
-	envVarName := "CONCOURSE_POSTGRES_" + strings.ToUpper(paramName)
+	envVarName := envVarName(paramName)
 	var param Parameter
 	for _, envVar := range container.Env {
 		if envVar.Name == envVarName {
-			if envVar.Value != "" {
-				val := envVar.Value
-				param = func(K8sClient) (string, error) {
-					return val, nil
-				}
-			} else {
-				secretName := envVar.ValueFrom.SecretKeyRef.LocalObjectReference.Name
-				key := envVar.ValueFrom.SecretKeyRef.Key
-				param = func(client K8sClient) (string, error) {
-					return client.GetSecret(secretName, key)
-				}
-			}
+			param = wp.getParam(paramName, container, envVar)
 		}
 	}
 	if param == nil {
@@ -173,6 +170,83 @@ func (wp *K8sWebPod) PostgresParam(paramName string) (Parameter, error) {
 			)
 	}
 	return param, nil
+}
+
+func (wp *K8sWebPod) getParam(
+	paramName string,
+	container corev1.Container,
+	envVar corev1.EnvVar,
+) Parameter {
+	switch paramName {
+	case "sslrootcert", "sslcert", "sslkey":
+		// find the VolumeMount whose MountPath is a prefix for envVar.Value
+		var volumeMount corev1.VolumeMount
+		for _, vm := range container.VolumeMounts {
+			if strings.HasPrefix(envVar.Value, vm.MountPath) {
+				volumeMount = vm
+			}
+		}
+		var volume corev1.Volume
+		// find the Volume referenced by volumeMount
+		for _, v := range wp.Spec.Volumes {
+			if v.Name == volumeMount.Name {
+				volume = v
+			}
+		}
+		// find the item whose path matches the envVar
+		var item corev1.KeyToPath
+		for _, i := range volume.VolumeSource.Secret.Items {
+			if envVar.Value == volumeMount.MountPath+"/"+i.Path {
+				item = i
+			}
+		}
+		secretName := volume.VolumeSource.Secret.SecretName
+		key := item.Key
+		return func(client K8sClient) (string, error) {
+			contents, err := client.GetSecret(secretName, key)
+			if err != nil {
+				return "", err
+			}
+			tmpfile, err := ioutil.TempFile("", paramName)
+			if err != nil {
+				return "", err
+			}
+			defer tmpfile.Close()
+			_, err = tmpfile.Write([]byte(contents))
+			if err != nil {
+				return "", err
+			}
+			return tmpfile.Name(), nil
+		}
+
+	default:
+		if envVar.Value != "" {
+			val := envVar.Value
+			return func(K8sClient) (string, error) {
+				return val, nil
+			}
+		} else {
+			secretKeyRef := envVar.ValueFrom.SecretKeyRef
+			secretName := secretKeyRef.LocalObjectReference.Name
+			key := secretKeyRef.Key
+			return func(client K8sClient) (string, error) {
+				return client.GetSecret(secretName, key)
+			}
+		}
+	}
+}
+
+func envVarName(paramName string) string {
+	switch paramName {
+	case "sslrootcert":
+		return "CONCOURSE_POSTGRES_CA_CERT"
+	case "sslcert":
+		return "CONCOURSE_POSTGRES_CLIENT_CERT"
+	case "sslkey":
+		return "CONCOURSE_POSTGRES_CLIENT_KEY"
+	default:
+		return "CONCOURSE_POSTGRES_" + strings.ToUpper(paramName)
+	}
 }
 
 func findWebContainer(spec corev1.PodSpec) (corev1.Container, error) {
