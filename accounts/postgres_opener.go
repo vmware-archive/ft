@@ -94,10 +94,10 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// if pgConn.UsesTls() {
-	// 	sql.Register("postgrestls", &pgConn)
-	// 	return sql.Open("postgrestls", pgConn.String())
-	// }
+	if pgConn.UsesTls() {
+		sql.Register("postgrestls", &pgConn)
+		return sql.Open("postgrestls", pgConn.String())
+	}
 	return sql.Open("postgres", pgConn.String())
 }
 
@@ -133,6 +133,19 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 	case "", "require", "verify-ca":
 		conn.tlsConf.InsecureSkipVerify = true
 	}
+	sslrootcertParam, _ := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
+	if sslrootcertParam != nil {
+		sslrootcert, err := sslrootcertParam(conn.client)
+		if err != nil {
+			return PostgresConnection{}, err
+		}
+		conn.tlsConf.RootCAs = x509.NewCertPool()
+		if !conn.tlsConf.RootCAs.AppendCertsFromPEM([]byte(sslrootcert)) {
+			return PostgresConnection{},
+				errors.New("couldn't parse pem in sslrootcert")
+		}
+	}
+	conn.tlsConf.Renegotiation = tls.RenegotiateFreelyAsClient
 	sslcert, err := conn.ReadFile("CONCOURSE_POSTGRES_CLIENT_CERT", pod)
 	if err != nil {
 		return conn, nil
@@ -148,19 +161,6 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 		}
 		conn.tlsConf.Certificates = []tls.Certificate{cert}
 	}
-	sslrootcert, err := conn.ReadFile("CONCOURSE_POSTGRES_CA_CERT", pod)
-	if err != nil {
-		return conn, nil
-	}
-	if sslrootcert != "" {
-		conn.tlsConf.RootCAs = x509.NewCertPool()
-		if !conn.tlsConf.RootCAs.AppendCertsFromPEM([]byte(sslrootcert)) {
-			return PostgresConnection{},
-				errors.New("couldn't parse pem in sslrootcert")
-		}
-	}
-	conn.tlsConf.Renegotiation = tls.RenegotiateFreelyAsClient
-	conn.sslmode = "disable"
 
 	return conn, nil
 }
@@ -197,9 +197,6 @@ func (pc *PostgresConnection) DialContext(ctx context.Context, network, address 
 	return pc.upgrade(conn)
 }
 
-// <size in bytes as uint32><message>
-// 8<magic ssl number>
-
 func (pc *PostgresConnection) upgrade(conn net.Conn) (net.Conn, error) {
 	// startup packet
 	header := make([]byte, 4)
@@ -226,13 +223,13 @@ func (pc *PostgresConnection) upgrade(conn net.Conn) (net.Conn, error) {
 }
 
 type PostgresConnection struct {
-	client     K8sClient
-	host       string
-	port       string
-	user       string
-	password   string
-	sslmode    string
-	tlsConf    tls.Config
+	client   K8sClient
+	host     string
+	port     string
+	user     string
+	password string
+	sslmode  string
+	tlsConf  tls.Config
 }
 
 func (pc *PostgresConnection) ReadParam(paramName string, pod WebPod) (string, error) {
@@ -262,7 +259,12 @@ func (pc *PostgresConnection) String() string {
 	}
 	parts = append(parts, "user="+pc.user)
 	parts = append(parts, "password="+pc.password)
-	parts = append(parts, "sslmode="+pc.sslmode)
+	if pc.UsesTls() {
+		// using a custom dialer so that `pq` doesn't try to handle TLS
+		parts = append(parts, "sslmode=disable")
+	} else {
+		parts = append(parts, "sslmode="+pc.sslmode)
+	}
 	return strings.Join(parts, " ")
 }
 
@@ -280,17 +282,14 @@ func (wp *K8sWebPod) PostgresParam(paramName string) (Parameter, error) {
 	var param Parameter
 	for _, envVar := range container.Env {
 		if envVar.Name == paramName {
-			param = wp.getParam(envVar)
+			return wp.getParam(envVar), nil
 		}
 	}
-	if param == nil {
-		return param,
-			fmt.Errorf("container '%s' does not have '%s' specified",
-				container.Name,
-				paramName,
-			)
-	}
-	return param, nil
+	return param,
+		fmt.Errorf("container '%s' does not have '%s' specified",
+			container.Name,
+			paramName,
+		)
 }
 
 func (wp *K8sWebPod) PostgresFile(paramName string) (Parameter, error) {
@@ -298,45 +297,57 @@ func (wp *K8sWebPod) PostgresFile(paramName string) (Parameter, error) {
 	if err != nil {
 		return nil, err
 	}
-	var param Parameter
 	for _, envVar := range container.Env {
 		if envVar.Name == paramName {
-			// find the VolumeMount whose MountPath is a prefix for envVar.Value
-			var volumeMount corev1.VolumeMount
-			for _, vm := range container.VolumeMounts {
-				if strings.HasPrefix(envVar.Value, vm.MountPath) {
-					volumeMount = vm
-				}
+			secretName, key, err := wp.secretForParam(container, envVar.Value)
+			if err != nil {
+				return func(client K8sClient) (string, error) {
+					return "", err
+				}, nil
 			}
-			var volume corev1.Volume
-			// find the Volume referenced by volumeMount
-			for _, v := range wp.Spec.Volumes {
-				if v.Name == volumeMount.Name {
-					volume = v
-				}
-			}
-			// find the item whose path matches the envVar
-			var item corev1.KeyToPath
-			for _, i := range volume.VolumeSource.Secret.Items {
-				if envVar.Value == volumeMount.MountPath+"/"+i.Path {
-					item = i
-				}
-			}
-			secretName := volume.VolumeSource.Secret.SecretName
-			key := item.Key
-			param = func(client K8sClient) (string, error) {
+			return func(client K8sClient) (string, error) {
 				return client.GetSecret(secretName, key)
-			}
+			}, nil
 		}
 	}
-	if param == nil {
-		return param,
-			fmt.Errorf("container '%s' does not have '%s' specified",
-				container.Name,
-				paramName,
-			)
+	return nil,
+		fmt.Errorf("container '%s' does not have '%s' specified",
+			container.Name,
+			paramName,
+		)
+}
+
+func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue string) (string, string, error) {
+	// find the VolumeMount whose MountPath is a prefix for paramValue
+	var volumeMount *corev1.VolumeMount
+	for _, vm := range container.VolumeMounts {
+		if strings.HasPrefix(paramValue, vm.MountPath) {
+			volumeMount = &vm
+		}
 	}
-	return param, nil
+	if volumeMount == nil {
+		return "", "", fmt.Errorf(
+			"pod has no volume mounts matching '%s'",
+			paramValue,
+		)
+	}
+	var volume corev1.Volume
+	// find the Volume referenced by volumeMount
+	for _, v := range wp.Spec.Volumes {
+		if v.Name == volumeMount.Name {
+			volume = v
+		}
+	}
+	// find the item whose path matches the envVar
+	var item corev1.KeyToPath
+	for _, i := range volume.VolumeSource.Secret.Items {
+		if paramValue == volumeMount.MountPath+"/"+i.Path {
+			item = i
+		}
+	}
+	secretName := volume.VolumeSource.Secret.SecretName
+	key := item.Key
+	return secretName, key, nil
 }
 
 func (wp *K8sWebPod) getParam(envVar corev1.EnvVar) Parameter {

@@ -2,11 +2,15 @@ package accounts_test
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/pem"
 	"errors"
-	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,7 +44,7 @@ func (tkc *testk8sClient) GetSecret(name, key string) (string, error) {
 	return tkc.secrets[name][key], nil
 }
 
-func (s *PostgresOpenerSuite) fakePostgres() (string, net.Listener) {
+func (s *PostgresOpenerSuite) fakePostgres(tlsConf *tls.Config) (string, net.Listener) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	s.NoError(err)
 	_, port, err := net.SplitHostPort(ln.Addr().String())
@@ -59,9 +63,8 @@ func (s *PostgresOpenerSuite) fakePostgres() (string, net.Listener) {
 			body := make([]byte, 4)
 			binary.BigEndian.PutUint32(body, uint32(80877103))
 			if bytes.Equal(buf, append(header, body...)) {
-				fmt.Println("client wants TLS")
-				conn.Write(append(header, 'S'))
-				conn = tls.Server(conn, nil)
+				conn.Write([]byte{'S'})
+				conn = tls.Server(conn, tlsConf)
 			}
 			// tell the client SSL is enabled, if they asked
 			// upgrade connection tls.Server(conn,config)
@@ -101,7 +104,7 @@ func (s *PostgresOpenerSuite) fakePostgres() (string, net.Listener) {
 }
 
 func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
-	port, pg := s.fakePostgres()
+	port, pg := s.fakePostgres(nil)
 	defer pg.Close()
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
 		K8sClient: &testk8sClient{
@@ -122,8 +125,37 @@ func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
 	s.NoError(err)
 }
 
+func (s *PostgresOpenerSuite) generateKeyPair() ([]byte, []byte) {
+	priv, err := rsa.GenerateKey(rand.Reader, 4096)
+	s.NoError(err)
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	s.NoError(err)
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	s.NoError(err)
+	certBlock := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: derBytes,
+	})
+	keyBlock := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	})
+	return certBlock, keyBlock
+}
+
 func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
-	port, pg := s.fakePostgres()
+	certBlock, keyBlock := s.generateKeyPair()
+	cert, err := tls.X509KeyPair(certBlock, keyBlock)
+	s.NoError(err)
+	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
+	port, pg := s.fakePostgres(tlsConf)
 	defer pg.Close()
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
 		K8sClient: &testk8sClient{
@@ -134,7 +166,7 @@ func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
 				user:        "postgres",
 				password:    "password",
 				sslmode:     "verify-ca",
-				sslrootcert: "this-is-a-root-cert",
+				sslrootcert: string(certBlock),
 			},
 		},
 		PodName: "pod-name",
@@ -423,6 +455,8 @@ type testWebPod struct {
 	password    string
 	sslmode     string
 	sslrootcert string
+	sslkey      string
+	sslcert     string
 }
 
 func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
@@ -438,8 +472,6 @@ func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 		val = twp.password
 	case "CONCOURSE_POSTGRES_SSLMODE":
 		val = twp.sslmode
-	case "CONCOURSE_POSTGRES_CA_CERT":
-		val = twp.sslrootcert
 	}
 	if val == "" {
 		return nil, errors.New("foobar")
@@ -448,6 +480,18 @@ func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 }
 
 func (twp *testWebPod) PostgresFile(param string) (accounts.Parameter, error) {
+	var val string
+	switch param {
+	case "CONCOURSE_POSTGRES_CA_CERT":
+		val = twp.sslrootcert
+	case "CONCOURSE_POSTGRES_CLIENT_CERT":
+		val = twp.sslcert
+	case "CONCOURSE_POSTGRES_CLIENT_KEY":
+		val = twp.sslkey
+	}
+	if val != "" {
+		return func(accounts.K8sClient) (string, error) { return val, nil }, nil
+	}
 	return nil, errors.New("foobar")
 }
 
@@ -534,4 +578,74 @@ func (s *PostgresOpenerSuite) TestReadsSSLMode() {
 		connection.String(),
 		"host=1.2.3.4 user=postgres password=password sslmode=verify-ca",
 	)
+}
+
+// client tls but no root cert
+// no client tls with root cert
+// both client tls and root cert
+// no ssl at all
+func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
+	container := corev1.Container{
+		Name: "helm-release-web",
+		Env: []corev1.EnvVar{
+			{
+				Name:  "CONCOURSE_POSTGRES_HOST",
+				Value: "example.com",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_USER",
+				Value: "postgres",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_PASSWORD",
+				Value: "password",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_SSLMODE",
+				Value: "verify-ca",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_CA_CERT",
+				Value: "/postgres-keys/ca.cert",
+			},
+		},
+	}
+	pod := &accounts.K8sWebPod{
+		&corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{container},
+			},
+		},
+	}
+
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+
+	_, err := opener.Connection(pod)
+	s.EqualError(
+		err,
+		"pod has no volume mounts matching '/postgres-keys/ca.cert'",
+	)
+}
+
+func (s *PostgresOpenerSuite) TestReadsClientTLSWithoutRootCert() {
+	certBlock, keyBlock := s.generateKeyPair()
+	pod := &testWebPod{
+		name:     "web",
+		host:     "1.2.3.4",
+		user:     "postgres",
+		password: "password",
+		sslmode:  "verify-ca",
+		sslkey:   string(keyBlock),
+		sslcert:  string(certBlock),
+	}
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+	connection, err := opener.Connection(pod)
+	s.NoError(err)
+	s.True(connection.UsesTls())
 }
