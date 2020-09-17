@@ -1,8 +1,11 @@
 package accounts_test
 
 import (
+	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -48,6 +51,20 @@ func (s *PostgresOpenerSuite) fakePostgres() (string, net.Listener) {
 			if err != nil {
 				continue
 			}
+			// if client expects SSL, magic SSL number
+			buf := make([]byte, 8)
+			conn.Read(buf)
+			header := make([]byte, 4)
+			binary.BigEndian.PutUint32(header, uint32(8))
+			body := make([]byte, 4)
+			binary.BigEndian.PutUint32(body, uint32(80877103))
+			if bytes.Equal(buf, append(header, body...)) {
+				fmt.Println("client wants TLS")
+				conn.Write(append(header, 'S'))
+				conn = tls.Server(conn, nil)
+			}
+			// tell the client SSL is enabled, if they asked
+			// upgrade connection tls.Server(conn,config)
 			// read until you see two null chars, which means
 			// the initial connection message is over
 			for {
@@ -63,11 +80,11 @@ func (s *PostgresOpenerSuite) fakePostgres() (string, net.Listener) {
 			// tell that you're ready for a query
 			size := make([]byte, 4)
 			binary.BigEndian.PutUint32(size, uint32(5))
-			header := append([]byte{'Z'}, size...)
+			header = append([]byte{'Z'}, size...)
 			conn.Write(append(header, 'I'))
 			// read the simple query ";" that pq uses to ping;
 			// it happens to be 7 bytes long
-			buf := make([]byte, 7)
+			buf = make([]byte, 7)
 			conn.Read(buf)
 			// I think 'I' means no results
 			size = make([]byte, 4)
@@ -94,6 +111,30 @@ func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
 				port:     port,
 				user:     "postgres",
 				password: "password",
+			},
+		},
+		PodName: "pod-name",
+	}
+
+	db, err := opener.Open()
+	s.NoError(err)
+	err = db.Ping()
+	s.NoError(err)
+}
+
+func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
+	port, pg := s.fakePostgres()
+	defer pg.Close()
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{
+			pod: &testWebPod{
+				name:        "helm-release-web",
+				host:        "127.0.0.1",
+				port:        port,
+				user:        "postgres",
+				password:    "password",
+				sslmode:     "verify-ca",
+				sslrootcert: "this-is-a-root-cert",
 			},
 		},
 		PodName: "pod-name",
@@ -375,12 +416,13 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMissingParam() {
 }
 
 type testWebPod struct {
-	name     string
-	host     string
-	port     string
-	user     string
-	password string
-	sslmode  string
+	name        string
+	host        string
+	port        string
+	user        string
+	password    string
+	sslmode     string
+	sslrootcert string
 }
 
 func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
@@ -396,6 +438,8 @@ func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 		val = twp.password
 	case "CONCOURSE_POSTGRES_SSLMODE":
 		val = twp.sslmode
+	case "CONCOURSE_POSTGRES_CA_CERT":
+		val = twp.sslrootcert
 	}
 	if val == "" {
 		return nil, errors.New("foobar")

@@ -94,10 +94,10 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if pgConn.UsesTls() {
-		sql.Register("postgrestls", &pgConn)
-		return sql.Open("postgrestls", pgConn.String())
-	}
+	// if pgConn.UsesTls() {
+	// 	sql.Register("postgrestls", &pgConn)
+	// 	return sql.Open("postgrestls", pgConn.String())
+	// }
 	return sql.Open("postgres", pgConn.String())
 }
 
@@ -196,6 +196,9 @@ func (pc *PostgresConnection) DialContext(ctx context.Context, network, address 
 	}
 	return pc.upgrade(conn)
 }
+
+// <size in bytes as uint32><message>
+// 8<magic ssl number>
 
 func (pc *PostgresConnection) upgrade(conn net.Conn) (net.Conn, error) {
 	// startup packet
