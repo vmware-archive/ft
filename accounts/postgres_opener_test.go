@@ -1,9 +1,10 @@
 package accounts_test
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
-	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 
@@ -36,13 +37,61 @@ func (tkc *testk8sClient) GetSecret(name, key string) (string, error) {
 	return tkc.secrets[name][key], nil
 }
 
+func (s *PostgresOpenerSuite) fakePostgres() (string, net.Listener) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	s.NoError(err)
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	s.NoError(err)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+			// read until you see two null chars, which means
+			// the initial connection message is over
+			for {
+				buf := make([]byte, 1)
+				conn.Read(buf)
+				if buf[0] == '\000' {
+					conn.Read(buf)
+					if buf[0] == '\000' {
+						break
+					}
+				}
+			}
+			// tell that you're ready for a query
+			size := make([]byte, 4)
+			binary.BigEndian.PutUint32(size, uint32(5))
+			header := append([]byte{'Z'}, size...)
+			conn.Write(append(header, 'I'))
+			// read the simple query ";" that pq uses to ping;
+			// it happens to be 7 bytes long
+			buf := make([]byte, 7)
+			conn.Read(buf)
+			// I think 'I' means no results
+			size = make([]byte, 4)
+			binary.BigEndian.PutUint32(size, uint32(4))
+			conn.Write(append([]byte{'I'}, size...))
+			// Then 'Z' means done
+			size = make([]byte, 4)
+			binary.BigEndian.PutUint32(size, uint32(5))
+			header = append([]byte{'Z'}, size...)
+			conn.Write(append(header, 'I'))
+		}
+	}()
+	return port, ln
+}
+
 func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
+	port, pg := s.fakePostgres()
+	defer pg.Close()
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
 		K8sClient: &testk8sClient{
 			pod: &testWebPod{
 				name:     "helm-release-web",
-				host:     dbHost(),
-				port:     "5432",
+				host:     "127.0.0.1",
+				port:     port,
 				user:     "postgres",
 				password: "password",
 			},
@@ -86,6 +135,12 @@ func (s *PostgresOpenerSuite) TestGetPodFindsPod() {
 		Containers: []corev1.Container{
 			{
 				Name: "helm-release-web",
+				Env: []corev1.EnvVar{
+					{
+						Name:  "CONCOURSE_POSTGRES_HOST",
+						Value: "example.com",
+					},
+				},
 			},
 		},
 	}
@@ -117,7 +172,11 @@ func (s *PostgresOpenerSuite) TestGetPodFindsPod() {
 
 	pod, err := client.GetPod(podName)
 	s.NoError(err)
-	s.Equal(pod.Name(), podName)
+	hostParam, err := pod.PostgresParam("CONCOURSE_POSTGRES_HOST")
+	s.NoError(err)
+	host, err := hostParam(client)
+	s.NoError(err)
+	s.Equal(host, "example.com")
 }
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
@@ -150,7 +209,7 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
 		},
 	}
 
-	userParam, err := pod.PostgresParam("user")
+	userParam, err := pod.PostgresParam("CONCOURSE_POSTGRES_USER")
 	s.NoError(err)
 	userParamValue, err := userParam(&testk8sClient{
 		secrets: map[string]map[string]string{
@@ -203,18 +262,17 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
 		},
 	}
 
-	caCertParam, err := pod.PostgresParam("sslrootcert")
+	fileParam, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
 	s.NoError(err)
-	caCertParamValue, err := caCertParam(&testk8sClient{
+	fileParamValue, err := fileParam(&testk8sClient{
 		secrets: map[string]map[string]string{
 			secretName: map[string]string{
 				secretKey: "ssl cert",
 			},
 		},
 	})
-	contents, err := ioutil.ReadFile(caCertParamValue)
 	s.NoError(err)
-	s.Equal(string(contents), "ssl cert")
+	s.Equal(fileParamValue, "ssl cert")
 }
 
 func (s *PostgresOpenerSuite) TestK8sClientLooksUpSecrets() {
@@ -309,10 +367,10 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMissingParam() {
 			},
 		},
 	}
-	_, err := pod.PostgresParam("param")
+	_, err := pod.PostgresParam("PARAM")
 	s.EqualError(
 		err,
-		"container 'web' does not have 'CONCOURSE_POSTGRES_PARAM' specified",
+		"container 'web' does not have 'PARAM' specified",
 	)
 }
 
@@ -328,21 +386,25 @@ type testWebPod struct {
 func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 	var val string
 	switch param {
-	case "host":
+	case "CONCOURSE_POSTGRES_HOST":
 		val = twp.host
-	case "port":
+	case "CONCOURSE_POSTGRES_PORT":
 		val = twp.port
-	case "user":
+	case "CONCOURSE_POSTGRES_USER":
 		val = twp.user
-	case "password":
+	case "CONCOURSE_POSTGRES_PASSWORD":
 		val = twp.password
-	case "sslmode":
+	case "CONCOURSE_POSTGRES_SSLMODE":
 		val = twp.sslmode
 	}
 	if val == "" {
 		return nil, errors.New("foobar")
 	}
 	return func(accounts.K8sClient) (string, error) { return val, nil }, nil
+}
+
+func (twp *testWebPod) PostgresFile(param string) (accounts.Parameter, error) {
+	return nil, errors.New("foobar")
 }
 
 func (twp *testWebPod) Name() string {
@@ -359,7 +421,7 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingHost() {
 		K8sClient: &testk8sClient{pod: pod},
 		PodName:   "pod-name",
 	}
-	_, err := opener.ConnectionString(pod)
+	_, err := opener.Connection(pod)
 	s.Error(err)
 }
 
@@ -373,7 +435,7 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingUser() {
 		K8sClient: &testk8sClient{pod: pod},
 		PodName:   "pod-name",
 	}
-	_, err := opener.ConnectionString(pod)
+	_, err := opener.Connection(pod)
 	s.Error(err)
 }
 
@@ -387,7 +449,7 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingPassword() {
 		K8sClient: &testk8sClient{pod: pod},
 		PodName:   "pod-name",
 	}
-	_, err := opener.ConnectionString(pod)
+	_, err := opener.Connection(pod)
 	s.Error(err)
 }
 
@@ -402,10 +464,10 @@ func (s *PostgresOpenerSuite) TestOmitsPortWhenUnspecified() {
 		K8sClient: &testk8sClient{pod: pod},
 		PodName:   "pod-name",
 	}
-	connectionString, err := opener.ConnectionString(pod)
+	connection, err := opener.Connection(pod)
 	s.NoError(err)
 	s.Equal(
-		connectionString,
+		connection.String(),
 		"host=1.2.3.4 user=postgres password=password sslmode=disable",
 	)
 }
@@ -422,10 +484,10 @@ func (s *PostgresOpenerSuite) TestReadsSSLMode() {
 		K8sClient: &testk8sClient{pod: pod},
 		PodName:   "pod-name",
 	}
-	connectionString, err := opener.ConnectionString(pod)
+	connection, err := opener.Connection(pod)
 	s.NoError(err)
 	s.Equal(
-		connectionString,
+		connection.String(),
 		"host=1.2.3.4 user=postgres password=password sslmode=verify-ca",
 	)
 }
