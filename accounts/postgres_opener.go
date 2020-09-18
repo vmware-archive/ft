@@ -94,9 +94,8 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if pgConn.UsesTls() {
-		sql.Register("postgrestls", &pgConn)
-		return sql.Open("postgrestls", pgConn.String())
+	if pgConn.ShouldOverrideDefaultDialer() {
+		return sql.OpenDB(pgConn), nil
 	}
 	return sql.Open("postgres", pgConn.String())
 }
@@ -108,21 +107,21 @@ type WebPod interface {
 
 func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 	pod WebPod,
-) (PostgresConnection, error) {
+) (*PostgresConnection, error) {
 	conn := PostgresConnection{client: kwnipo.K8sClient}
 	var err error
 	conn.host, err = conn.ReadParam("CONCOURSE_POSTGRES_HOST", pod)
 	if err != nil {
-		return PostgresConnection{}, err
+		return nil, err
 	}
 	conn.port, _ = conn.ReadParam("CONCOURSE_POSTGRES_PORT", pod)
 	conn.user, err = conn.ReadParam("CONCOURSE_POSTGRES_USER", pod)
 	if err != nil {
-		return PostgresConnection{}, err
+		return nil, err
 	}
 	conn.password, err = conn.ReadParam("CONCOURSE_POSTGRES_PASSWORD", pod)
 	if err != nil {
-		return PostgresConnection{}, err
+		return nil, err
 	}
 	conn.sslmode, err = conn.ReadParam("CONCOURSE_POSTGRES_SSLMODE", pod)
 	if err != nil {
@@ -133,40 +132,65 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 	case "", "require", "verify-ca":
 		conn.tlsConf.InsecureSkipVerify = true
 	}
-	sslrootcertParam, _ := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
-	if sslrootcertParam != nil {
-		sslrootcert, err := sslrootcertParam(conn.client)
-		if err != nil {
-			return PostgresConnection{}, err
-		}
-		conn.tlsConf.RootCAs = x509.NewCertPool()
-		if !conn.tlsConf.RootCAs.AppendCertsFromPEM([]byte(sslrootcert)) {
-			return PostgresConnection{},
-				errors.New("couldn't parse pem in sslrootcert")
-		}
+	err = conn.determineRootCert(pod)
+	if err != nil {
+		return nil, err
 	}
 	conn.tlsConf.Renegotiation = tls.RenegotiateFreelyAsClient
-	sslcert, err := conn.ReadFile("CONCOURSE_POSTGRES_CLIENT_CERT", pod)
-	if err != nil {
-		return conn, nil
+	var (
+		sslcert string
+		sslkey  string
+	)
+	sslcertParam, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_CERT")
+	if sslcertParam != nil {
+		sslcert, err = sslcertParam(conn.client)
+		if err != nil {
+			return nil, err
+		}
 	}
-	sslkey, err := conn.ReadFile("CONCOURSE_POSTGRES_CLIENT_KEY", pod)
-	if err != nil {
-		return conn, nil
+	sslkeyParam, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_KEY")
+	if sslkeyParam != nil {
+		sslkey, err = sslkeyParam(conn.client)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if sslcert != "" && sslkey != "" {
 		cert, err := tls.X509KeyPair([]byte(sslcert), []byte(sslkey))
 		if err != nil {
-			return PostgresConnection{}, err
+			return nil, err
 		}
 		conn.tlsConf.Certificates = []tls.Certificate{cert}
 	}
 
-	return conn, nil
+	return &conn, nil
+}
+
+func (pc *PostgresConnection) determineRootCert(pod WebPod) error {
+	sslrootcertParam, _ := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
+	if sslrootcertParam != nil {
+		sslrootcert, err := sslrootcertParam(pc.client)
+		if err != nil {
+			return err
+		}
+		pc.tlsConf.RootCAs = x509.NewCertPool()
+		if !pc.tlsConf.RootCAs.AppendCertsFromPEM([]byte(sslrootcert)) {
+			return errors.New("couldn't parse pem in sslrootcert")
+		}
+	}
+	return nil
 }
 
 func (pc *PostgresConnection) Open(name string) (driver.Conn, error) {
 	return pq.DialOpen(pc, name)
+}
+
+func (pc *PostgresConnection) Connect(_ context.Context) (driver.Conn, error) {
+	return pq.DialOpen(pc, pc.String())
+}
+
+func (pc *PostgresConnection) Driver() driver.Driver {
+	return pc
 }
 
 func (pc *PostgresConnection) dialer() *net.Dialer {
@@ -240,15 +264,7 @@ func (pc *PostgresConnection) ReadParam(paramName string, pod WebPod) (string, e
 	return param(pc.client)
 }
 
-func (pc *PostgresConnection) ReadFile(paramName string, pod WebPod) (string, error) {
-	param, err := pod.PostgresFile(paramName)
-	if err != nil {
-		return "", err
-	}
-	return param(pc.client)
-}
-
-func (pc *PostgresConnection) UsesTls() bool {
+func (pc *PostgresConnection) ShouldOverrideDefaultDialer() bool {
 	return pc.tlsConf.RootCAs != nil || len(pc.tlsConf.Certificates) > 0
 }
 
@@ -259,8 +275,7 @@ func (pc *PostgresConnection) String() string {
 	}
 	parts = append(parts, "user="+pc.user)
 	parts = append(parts, "password="+pc.password)
-	if pc.UsesTls() {
-		// using a custom dialer so that `pq` doesn't try to handle TLS
+	if pc.ShouldOverrideDefaultDialer() {
 		parts = append(parts, "sslmode=disable")
 	} else {
 		parts = append(parts, "sslmode="+pc.sslmode)
@@ -332,12 +347,15 @@ func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue strin
 		)
 	}
 	var volume corev1.Volume
+	// TODO: test when this fails -- an exotic k8s error?
 	// find the Volume referenced by volumeMount
 	for _, v := range wp.Spec.Volumes {
 		if v.Name == volumeMount.Name {
 			volume = v
 		}
 	}
+	// TODO: test when this fails -- maybe filesystem paths don't get
+	// constructed quite how you imagine? symlinks!?
 	// find the item whose path matches the envVar
 	var item corev1.KeyToPath
 	for _, i := range volume.VolumeSource.Secret.Items {

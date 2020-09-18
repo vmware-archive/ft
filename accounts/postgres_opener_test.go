@@ -580,10 +580,6 @@ func (s *PostgresOpenerSuite) TestReadsSSLMode() {
 	)
 }
 
-// client tls but no root cert
-// no client tls with root cert
-// both client tls and root cert
-// no ssl at all
 func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 	container := corev1.Container{
 		Name: "helm-release-web",
@@ -630,22 +626,122 @@ func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 	)
 }
 
+func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
+	container := corev1.Container{
+		Name: "helm-release-web",
+		Env: []corev1.EnvVar{
+			{
+				Name:  "CONCOURSE_POSTGRES_HOST",
+				Value: "example.com",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_USER",
+				Value: "postgres",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_PASSWORD",
+				Value: "password",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_SSLMODE",
+				Value: "verify-ca",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_CLIENT_CERT",
+				Value: "/postgres-keys/client.cert",
+			},
+		},
+	}
+	pod := &accounts.K8sWebPod{
+		&corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{container},
+			},
+		},
+	}
+
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+
+	_, err := opener.Connection(pod)
+	s.EqualError(
+		err,
+		"pod has no volume mounts matching '/postgres-keys/client.cert'",
+	)
+}
+
+func (s *PostgresOpenerSuite) TestFailsWhenClientKeyLookupErrors() {
+	container := corev1.Container{
+		Name: "helm-release-web",
+		Env: []corev1.EnvVar{
+			{
+				Name:  "CONCOURSE_POSTGRES_HOST",
+				Value: "example.com",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_USER",
+				Value: "postgres",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_PASSWORD",
+				Value: "password",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_SSLMODE",
+				Value: "verify-ca",
+			},
+			{
+				Name:  "CONCOURSE_POSTGRES_CLIENT_KEY",
+				Value: "/postgres-keys/client.key",
+			},
+		},
+	}
+	pod := &accounts.K8sWebPod{
+		&corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{container},
+			},
+		},
+	}
+
+	opener := &accounts.K8sWebNodeInferredPostgresOpener{
+		K8sClient: &testk8sClient{pod: pod},
+		PodName:   "pod-name",
+	}
+
+	_, err := opener.Connection(pod)
+	s.EqualError(
+		err,
+		"pod has no volume mounts matching '/postgres-keys/client.key'",
+	)
+}
+
 func (s *PostgresOpenerSuite) TestReadsClientTLSWithoutRootCert() {
 	certBlock, keyBlock := s.generateKeyPair()
+	cert, err := tls.X509KeyPair(certBlock, keyBlock)
+	s.NoError(err)
+	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
+	port, pg := s.fakePostgres(tlsConf)
+	defer pg.Close()
 	pod := &testWebPod{
-		name:     "web",
-		host:     "1.2.3.4",
-		user:     "postgres",
-		password: "password",
-		sslmode:  "verify-ca",
-		sslkey:   string(keyBlock),
-		sslcert:  string(certBlock),
+		name:        "web",
+		host:        "127.0.0.1",
+		port:        port,
+		user:        "postgres",
+		password:    "password",
+		sslmode:     "verify-ca",
+		sslkey:      string(keyBlock),
+		sslcert:     string(certBlock),
+		sslrootcert: string(certBlock),
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
 		K8sClient: &testk8sClient{pod: pod},
 		PodName:   "pod-name",
 	}
-	connection, err := opener.Connection(pod)
+	db, err := opener.Open()
 	s.NoError(err)
-	s.True(connection.UsesTls())
+	err = db.Ping()
+	s.NoError(err)
 }
