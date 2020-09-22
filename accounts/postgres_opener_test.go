@@ -622,7 +622,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 	_, err := opener.Connection(pod)
 	s.EqualError(
 		err,
-		"pod has no volume mounts matching '/postgres-keys/ca.cert'",
+		"container has no volume mounts matching '/postgres-keys/ca.cert'",
 	)
 }
 
@@ -668,7 +668,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
 	_, err := opener.Connection(pod)
 	s.EqualError(
 		err,
-		"pod has no volume mounts matching '/postgres-keys/client.cert'",
+		"container has no volume mounts matching '/postgres-keys/client.cert'",
 	)
 }
 
@@ -714,7 +714,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientKeyLookupErrors() {
 	_, err := opener.Connection(pod)
 	s.EqualError(
 		err,
-		"pod has no volume mounts matching '/postgres-keys/client.key'",
+		"container has no volume mounts matching '/postgres-keys/client.key'",
 	)
 }
 

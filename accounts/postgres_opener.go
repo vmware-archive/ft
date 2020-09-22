@@ -342,7 +342,7 @@ func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue strin
 	}
 	if volumeMount == nil {
 		return "", "", fmt.Errorf(
-			"pod has no volume mounts matching '%s'",
+			"container has no volume mounts matching '%s'",
 			paramValue,
 		)
 	}
