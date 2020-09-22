@@ -36,8 +36,8 @@ type testk8sClient struct {
 	secrets map[string]map[string]string
 }
 
-func (tkc *testk8sClient) GetPod(name string) (accounts.WebPod, error) {
-	return tkc.pod, nil
+func (tkc *testk8sClient) GetPod(name string) (*corev1.Pod, error) {
+	return nil, nil
 }
 
 func (tkc *testk8sClient) GetSecret(name, key string) (string, error) {
@@ -107,14 +107,12 @@ func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
 	port, pg := s.fakePostgres(nil)
 	defer pg.Close()
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{
-			pod: &testWebPod{
-				name:     "helm-release-web",
-				host:     "127.0.0.1",
-				port:     port,
-				user:     "postgres",
-				password: "password",
-			},
+		WebPod: &testWebPod{
+			name:     "helm-release-web",
+			host:     "127.0.0.1",
+			port:     port,
+			user:     "postgres",
+			password: "password",
 		},
 		PodName: "pod-name",
 	}
@@ -158,16 +156,14 @@ func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
 	port, pg := s.fakePostgres(tlsConf)
 	defer pg.Close()
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{
-			pod: &testWebPod{
-				name:        "helm-release-web",
-				host:        "127.0.0.1",
-				port:        port,
-				user:        "postgres",
-				password:    "password",
-				sslmode:     "verify-ca",
-				sslrootcert: string(certBlock),
-			},
+		WebPod: &testWebPod{
+			name:        "helm-release-web",
+			host:        "127.0.0.1",
+			port:        port,
+			user:        "postgres",
+			password:    "password",
+			sslmode:     "verify-ca",
+			sslrootcert: string(certBlock),
 		},
 		PodName: "pod-name",
 	}
@@ -245,9 +241,8 @@ func (s *PostgresOpenerSuite) TestGetPodFindsPod() {
 
 	pod, err := client.GetPod(podName)
 	s.NoError(err)
-	hostParam, err := pod.PostgresParam("CONCOURSE_POSTGRES_HOST")
-	s.NoError(err)
-	host, err := hostParam(client)
+	webPod := &accounts.K8sWebPod{Pod: pod}
+	host, err := webPod.PostgresParam("CONCOURSE_POSTGRES_HOST")
 	s.NoError(err)
 	s.Equal(host, "example.com")
 }
@@ -270,7 +265,7 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
 		},
 	}
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
@@ -280,18 +275,18 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
 				},
 			},
 		},
+		Client: &testk8sClient{
+			secrets: map[string]map[string]string{
+				secretName: map[string]string{
+					secretKey: "username",
+				},
+			},
+		},
 	}
 
 	userParam, err := pod.PostgresParam("CONCOURSE_POSTGRES_USER")
 	s.NoError(err)
-	userParamValue, err := userParam(&testk8sClient{
-		secrets: map[string]map[string]string{
-			secretName: map[string]string{
-				secretKey: "username",
-			},
-		},
-	})
-	s.Equal(userParamValue, "username")
+	s.Equal(userParam, "username")
 }
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
@@ -327,25 +322,24 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
 		},
 	}
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{container},
 				Volumes:    []corev1.Volume{volume},
 			},
 		},
-	}
-
-	fileParam, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
-	s.NoError(err)
-	fileParamValue, err := fileParam(&testk8sClient{
-		secrets: map[string]map[string]string{
-			secretName: map[string]string{
-				secretKey: "ssl cert",
+		Client: &testk8sClient{
+			secrets: map[string]map[string]string{
+				secretName: map[string]string{
+					secretKey: "ssl cert",
+				},
 			},
 		},
-	})
+	}
+
+	fileContents, _, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
 	s.NoError(err)
-	s.Equal(fileParamValue, "ssl cert")
+	s.Equal(fileContents, "ssl cert")
 }
 
 func (s *PostgresOpenerSuite) TestK8sClientLooksUpSecrets() {
@@ -377,7 +371,7 @@ func (s *PostgresOpenerSuite) TestK8sClientLooksUpSecrets() {
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithNoContainers() {
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{},
 			},
@@ -389,7 +383,7 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithNoContainers() {
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithoutWebContainer() {
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
@@ -405,7 +399,7 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithoutWebContainer() 
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMultipleWebContainers() {
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
@@ -427,7 +421,7 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMultipleWebContain
 
 func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMissingParam() {
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
@@ -459,7 +453,7 @@ type testWebPod struct {
 	sslcert     string
 }
 
-func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
+func (twp *testWebPod) PostgresParam(param string) (string, error) {
 	var val string
 	switch param {
 	case "CONCOURSE_POSTGRES_HOST":
@@ -474,12 +468,12 @@ func (twp *testWebPod) PostgresParam(param string) (accounts.Parameter, error) {
 		val = twp.sslmode
 	}
 	if val == "" {
-		return nil, errors.New("foobar")
+		return "", errors.New("foobar")
 	}
-	return func(accounts.K8sClient) (string, error) { return val, nil }, nil
+	return val, nil
 }
 
-func (twp *testWebPod) PostgresFile(param string) (accounts.Parameter, error) {
+func (twp *testWebPod) PostgresFile(param string) (string, bool, error) {
 	var val string
 	switch param {
 	case "CONCOURSE_POSTGRES_CA_CERT":
@@ -490,9 +484,9 @@ func (twp *testWebPod) PostgresFile(param string) (accounts.Parameter, error) {
 		val = twp.sslkey
 	}
 	if val != "" {
-		return func(accounts.K8sClient) (string, error) { return val, nil }, nil
+		return val, true, nil
 	}
-	return nil, errors.New("foobar")
+	return "", false, errors.New("foobar")
 }
 
 func (twp *testWebPod) Name() string {
@@ -506,7 +500,7 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingHost() {
 		password: "password",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 	_, err := opener.Connection(pod)
@@ -520,7 +514,7 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingUser() {
 		password: "password",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 	_, err := opener.Connection(pod)
@@ -534,7 +528,7 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingPassword() {
 		user: "user",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 	_, err := opener.Connection(pod)
@@ -549,7 +543,7 @@ func (s *PostgresOpenerSuite) TestOmitsPortWhenUnspecified() {
 		password: "password",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 	connection, err := opener.Connection(pod)
@@ -569,7 +563,7 @@ func (s *PostgresOpenerSuite) TestReadsSSLMode() {
 		sslmode:  "verify-ca",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 	connection, err := opener.Connection(pod)
@@ -607,7 +601,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 		},
 	}
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{container},
 			},
@@ -615,7 +609,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 	}
 
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 
@@ -653,7 +647,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
 		},
 	}
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{container},
 			},
@@ -661,7 +655,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
 	}
 
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 
@@ -699,7 +693,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientKeyLookupErrors() {
 		},
 	}
 	pod := &accounts.K8sWebPod{
-		&corev1.Pod{
+		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{container},
 			},
@@ -707,7 +701,7 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientKeyLookupErrors() {
 	}
 
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 
@@ -737,7 +731,7 @@ func (s *PostgresOpenerSuite) TestReadsClientTLSWithoutRootCert() {
 		sslrootcert: string(certBlock),
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		K8sClient: &testk8sClient{pod: pod},
+		WebPod:    pod,
 		PodName:   "pod-name",
 	}
 	db, err := opener.Open()

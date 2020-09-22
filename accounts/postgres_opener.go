@@ -36,12 +36,12 @@ func (spo *StaticPostgresOpener) Open() (*sql.DB, error) {
 }
 
 type K8sWebNodeInferredPostgresOpener struct {
-	K8sClient K8sClient
+	WebPod    WebPod
 	PodName   string
 }
 
 type K8sClient interface {
-	GetPod(string) (WebPod, error)
+	GetPod(string) (*corev1.Pod, error)
 	GetSecret(string, string) (string, error)
 }
 
@@ -50,18 +50,14 @@ type k8sClient struct {
 	Namespace  string
 }
 
-func (kc *k8sClient) GetPod(name string) (WebPod, error) {
+func (kc *k8sClient) GetPod(name string) (*corev1.Pod, error) {
 	clientset, err := kubernetes.NewForConfig(kc.RESTConfig)
 	if err != nil {
 		return nil, err
 	}
-	pod, err := clientset.CoreV1().
+	return clientset.CoreV1().
 		Pods(kc.Namespace).
 		Get(context.Background(), name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return &K8sWebPod{pod}, nil
 }
 
 func (kc *k8sClient) GetSecret(name, key string) (string, error) {
@@ -86,11 +82,7 @@ func NewK8sClient(restConfig *rest.Config, namespace string) K8sClient {
 }
 
 func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
-	pod, err := kwnipo.K8sClient.GetPod(kwnipo.PodName)
-	if err != nil {
-		return nil, err
-	}
-	pgConn, err := kwnipo.Connection(pod)
+	pgConn, err := kwnipo.Connection(kwnipo.WebPod)
 	if err != nil {
 		return nil, err
 	}
@@ -101,14 +93,14 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
 }
 
 type WebPod interface {
-	PostgresParam(string) (Parameter, error)
-	PostgresFile(string) (Parameter, error)
+	PostgresParam(string) (string, error)
+	PostgresFile(string) (string, bool, error)
 }
 
 func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 	pod WebPod,
 ) (*PostgresConnection, error) {
-	conn := PostgresConnection{client: kwnipo.K8sClient}
+	conn := PostgresConnection{}
 	var err error
 	conn.host, err = conn.ReadParam("CONCOURSE_POSTGRES_HOST", pod)
 	if err != nil {
@@ -137,23 +129,13 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 		return nil, err
 	}
 	conn.tlsConf.Renegotiation = tls.RenegotiateFreelyAsClient
-	var (
-		sslcert string
-		sslkey  string
-	)
-	sslcertParam, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_CERT")
-	if sslcertParam != nil {
-		sslcert, err = sslcertParam(conn.client)
-		if err != nil {
-			return nil, err
-		}
+	sslcert, found, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_CERT")
+	if found && err != nil {
+		return nil, err
 	}
-	sslkeyParam, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_KEY")
-	if sslkeyParam != nil {
-		sslkey, err = sslkeyParam(conn.client)
-		if err != nil {
-			return nil, err
-		}
+	sslkey, found, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_KEY")
+	if found && err != nil {
+		return nil, err
 	}
 	if sslcert != "" && sslkey != "" {
 		cert, err := tls.X509KeyPair([]byte(sslcert), []byte(sslkey))
@@ -167,9 +149,8 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 }
 
 func (pc *PostgresConnection) determineRootCert(pod WebPod) error {
-	sslrootcertParam, _ := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
-	if sslrootcertParam != nil {
-		sslrootcert, err := sslrootcertParam(pc.client)
+	sslrootcert, found, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
+	if found {
 		if err != nil {
 			return err
 		}
@@ -247,7 +228,6 @@ func (pc *PostgresConnection) upgrade(conn net.Conn) (net.Conn, error) {
 }
 
 type PostgresConnection struct {
-	client   K8sClient
 	host     string
 	port     string
 	user     string
@@ -257,11 +237,7 @@ type PostgresConnection struct {
 }
 
 func (pc *PostgresConnection) ReadParam(paramName string, pod WebPod) (string, error) {
-	param, err := pod.PostgresParam(paramName)
-	if err != nil {
-		return "", err
-	}
-	return param(pc.client)
+	return pod.PostgresParam(paramName)
 }
 
 func (pc *PostgresConnection) ShouldOverrideDefaultDialer() bool {
@@ -284,48 +260,43 @@ func (pc *PostgresConnection) String() string {
 }
 
 type K8sWebPod struct {
-	*corev1.Pod
+	Pod    *corev1.Pod
+	Client K8sClient
 }
 
-type Parameter func(K8sClient) (string, error)
-
-func (wp *K8sWebPod) PostgresParam(paramName string) (Parameter, error) {
-	container, err := findWebContainer(wp.Spec)
+func (wp *K8sWebPod) PostgresParam(paramName string) (string, error) {
+	container, err := findWebContainer(wp.Pod.Spec)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	var param Parameter
 	for _, envVar := range container.Env {
 		if envVar.Name == paramName {
-			return wp.getParam(envVar), nil
+			return wp.getParam(envVar)
 		}
 	}
-	return param,
+	return "",
 		fmt.Errorf("container '%s' does not have '%s' specified",
 			container.Name,
 			paramName,
 		)
 }
 
-func (wp *K8sWebPod) PostgresFile(paramName string) (Parameter, error) {
-	container, err := findWebContainer(wp.Spec)
+func (wp *K8sWebPod) PostgresFile(paramName string) (string, bool, error) {
+	container, err := findWebContainer(wp.Pod.Spec)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	for _, envVar := range container.Env {
 		if envVar.Name == paramName {
 			secretName, key, err := wp.secretForParam(container, envVar.Value)
 			if err != nil {
-				return func(client K8sClient) (string, error) {
-					return "", err
-				}, nil
+				return "", true, err
 			}
-			return func(client K8sClient) (string, error) {
-				return client.GetSecret(secretName, key)
-			}, nil
+			val, err := wp.Client.GetSecret(secretName, key)
+			return val, true, err
 		}
 	}
-	return nil,
+	return "", false,
 		fmt.Errorf("container '%s' does not have '%s' specified",
 			container.Name,
 			paramName,
@@ -349,7 +320,7 @@ func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue strin
 	var volume corev1.Volume
 	// TODO: test when this fails -- an exotic k8s error?
 	// find the Volume referenced by volumeMount
-	for _, v := range wp.Spec.Volumes {
+	for _, v := range wp.Pod.Spec.Volumes {
 		if v.Name == volumeMount.Name {
 			volume = v
 		}
@@ -368,19 +339,14 @@ func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue strin
 	return secretName, key, nil
 }
 
-func (wp *K8sWebPod) getParam(envVar corev1.EnvVar) Parameter {
+func (wp *K8sWebPod) getParam(envVar corev1.EnvVar) (string, error) {
 	if envVar.Value != "" {
-		val := envVar.Value
-		return func(K8sClient) (string, error) {
-			return val, nil
-		}
+		return envVar.Value, nil
 	} else {
 		secretKeyRef := envVar.ValueFrom.SecretKeyRef
 		secretName := secretKeyRef.LocalObjectReference.Name
 		key := secretKeyRef.Key
-		return func(client K8sClient) (string, error) {
-			return client.GetSecret(secretName, key)
-		}
+		return wp.Client.GetSecret(secretName, key)
 	}
 }
 
