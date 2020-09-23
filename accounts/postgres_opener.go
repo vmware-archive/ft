@@ -2,22 +2,16 @@ package accounts
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
-	"database/sql/driver"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"net"
+	"io/ioutil"
+	"os"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/concourse/flag"
-	"github.com/lib/pq"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -36,8 +30,8 @@ func (spo *StaticPostgresOpener) Open() (*sql.DB, error) {
 }
 
 type K8sWebNodeInferredPostgresOpener struct {
-	WebPod    WebPod
-	PodName   string
+	WebPod  WebPod
+	PodName string
 }
 
 type K8sClient interface {
@@ -86,15 +80,23 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if pgConn.ShouldOverrideDefaultDialer() {
-		return sql.OpenDB(pgConn), nil
+	defer pgConn.CleanupTempFiles()
+	db, err := sql.Open("postgres", pgConn.String())
+	if err != nil {
+		return nil, err
 	}
-	return sql.Open("postgres", pgConn.String())
+	err = db.Ping()
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
 }
 
-type WebPod interface {
+// k8s API impl vs CRI exec impl
+// corev1.Pod       spdyconn
+type WebPod interface { // TODO rename WebNode -- should not be k8s-specific
 	PostgresParam(string) (string, error)
-	PostgresFile(string) (string, bool, error)
+	PostgresFile(string) (string, error)
 }
 
 func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
@@ -102,146 +104,105 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
 ) (*PostgresConnection, error) {
 	conn := PostgresConnection{}
 	var err error
-	conn.host, err = conn.ReadParam("CONCOURSE_POSTGRES_HOST", pod)
+	conn.host, err = pod.PostgresParam("CONCOURSE_POSTGRES_HOST")
 	if err != nil {
 		return nil, err
 	}
-	conn.port, _ = conn.ReadParam("CONCOURSE_POSTGRES_PORT", pod)
-	conn.user, err = conn.ReadParam("CONCOURSE_POSTGRES_USER", pod)
+	// TODO why isn't there error handling here? (hint: there is a default)
+	conn.port, _ = pod.PostgresParam("CONCOURSE_POSTGRES_PORT")
+	conn.user, err = pod.PostgresParam("CONCOURSE_POSTGRES_USER")
 	if err != nil {
 		return nil, err
 	}
-	conn.password, err = conn.ReadParam("CONCOURSE_POSTGRES_PASSWORD", pod)
+	conn.password, err = pod.PostgresParam("CONCOURSE_POSTGRES_PASSWORD")
 	if err != nil {
 		return nil, err
 	}
-	conn.sslmode, err = conn.ReadParam("CONCOURSE_POSTGRES_SSLMODE", pod)
+	conn.sslmode, err = pod.PostgresParam("CONCOURSE_POSTGRES_SSLMODE")
 	if err != nil {
 		conn.sslmode = "disable"
 	}
 
-	switch conn.sslmode {
-	case "", "require", "verify-ca":
-		conn.tlsConf.InsecureSkipVerify = true
-	}
 	err = conn.determineRootCert(pod)
 	if err != nil {
 		return nil, err
 	}
-	conn.tlsConf.Renegotiation = tls.RenegotiateFreelyAsClient
-	sslcert, found, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_CERT")
-	if found && err != nil {
+	sslcert, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_CERT")
+	if err != nil {
 		return nil, err
 	}
-	sslkey, found, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_KEY")
-	if found && err != nil {
+	sslkey, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_KEY")
+	if err != nil {
 		return nil, err
 	}
 	if sslcert != "" && sslkey != "" {
-		cert, err := tls.X509KeyPair([]byte(sslcert), []byte(sslkey))
+		conn.sslcert, err = tempfileFromString(sslcert)
 		if err != nil {
 			return nil, err
 		}
-		conn.tlsConf.Certificates = []tls.Certificate{cert}
+		conn.sslkey, err = tempfileFromString(sslkey)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &conn, nil
 }
 
 func (pc *PostgresConnection) determineRootCert(pod WebPod) error {
-	sslrootcert, found, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
-	if found {
+	sslrootcert, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
+	if err != nil {
+		return err
+	}
+	if sslrootcert != "" {
+		pc.sslrootcert, err = tempfileFromString(sslrootcert)
 		if err != nil {
 			return err
-		}
-		pc.tlsConf.RootCAs = x509.NewCertPool()
-		if !pc.tlsConf.RootCAs.AppendCertsFromPEM([]byte(sslrootcert)) {
-			return errors.New("couldn't parse pem in sslrootcert")
 		}
 	}
 	return nil
 }
 
-func (pc *PostgresConnection) Open(name string) (driver.Conn, error) {
-	return pq.DialOpen(pc, name)
-}
-
-func (pc *PostgresConnection) Connect(_ context.Context) (driver.Conn, error) {
-	return pq.DialOpen(pc, pc.String())
-}
-
-func (pc *PostgresConnection) Driver() driver.Driver {
-	return pc
-}
-
-func (pc *PostgresConnection) dialer() *net.Dialer {
-	return &net.Dialer{}
-}
-
-func (pc *PostgresConnection) Dial(network, address string) (net.Conn, error) {
-	conn, err := pc.dialer().Dial(network, address)
+func tempfileFromString(contents string) (string, error) {
+	tmpfile, err := ioutil.TempFile("", "")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return pc.upgrade(conn)
-}
-func (pc *PostgresConnection) DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	conn, err := pc.dialer().DialContext(ctx, network, address)
+	_, err = tmpfile.Write([]byte(contents))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return pc.upgrade(conn)
-}
-func (pc *PostgresConnection) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	conn, err := pc.dialer().DialContext(ctx, network, address)
+	err = tmpfile.Close()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return pc.upgrade(conn)
+	return tmpfile.Name(), nil
 }
 
-func (pc *PostgresConnection) upgrade(conn net.Conn) (net.Conn, error) {
-	// startup packet
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(8))
-	body := make([]byte, 4)
-	binary.BigEndian.PutUint32(body, uint32(80877103))
-	_, err := conn.Write(append(header, body...))
-	if err != nil {
-		return nil, err
+func (pc *PostgresConnection) CleanupTempFiles() {
+	if pc.sslrootcert != "" {
+		os.Remove(pc.sslrootcert)
 	}
-
-	// read the response, check if it starts with 'S'
-	buf := make([]byte, 1)
-	_, err = io.ReadFull(conn, buf)
-	if err != nil {
-		return nil, err
+	if pc.sslcert != "" {
+		os.Remove(pc.sslcert)
 	}
-	if buf[0] != 'S' {
-		return nil, errors.New("SSL is not enabled on the server")
+	if pc.sslkey != "" {
+		os.Remove(pc.sslkey)
 	}
-
-	// create the tls.Client using conn
-	return tls.Client(conn, &pc.tlsConf), nil
 }
+
+// TODO what if the database is different from the user
+// TODO what about connection timeout
 
 type PostgresConnection struct {
-	host     string
-	port     string
-	user     string
-	password string
-	sslmode  string
-	tlsConf  tls.Config
-}
-
-func (pc *PostgresConnection) ReadParam(paramName string, pod WebPod) (string, error) {
-	return pod.PostgresParam(paramName)
-}
-
-func (pc *PostgresConnection) ShouldOverrideDefaultDialer() bool {
-	return pc.tlsConf.RootCAs != nil || len(pc.tlsConf.Certificates) > 0
+	host        string
+	port        string
+	user        string
+	password    string
+	sslmode     string
+	sslrootcert string
+	sslcert     string
+	sslkey      string
 }
 
 func (pc *PostgresConnection) String() string {
@@ -251,10 +212,15 @@ func (pc *PostgresConnection) String() string {
 	}
 	parts = append(parts, "user="+pc.user)
 	parts = append(parts, "password="+pc.password)
-	if pc.ShouldOverrideDefaultDialer() {
-		parts = append(parts, "sslmode=disable")
-	} else {
-		parts = append(parts, "sslmode="+pc.sslmode)
+	parts = append(parts, "sslmode="+pc.sslmode)
+	if pc.sslrootcert != "" {
+		parts = append(parts, "sslrootcert="+pc.sslrootcert)
+	}
+	if pc.sslcert != "" {
+		parts = append(parts, "sslcert="+pc.sslcert)
+	}
+	if pc.sslkey != "" {
+		parts = append(parts, "sslkey="+pc.sslkey)
 	}
 	return strings.Join(parts, " ")
 }
@@ -281,26 +247,21 @@ func (wp *K8sWebPod) PostgresParam(paramName string) (string, error) {
 		)
 }
 
-func (wp *K8sWebPod) PostgresFile(paramName string) (string, bool, error) {
+func (wp *K8sWebPod) PostgresFile(paramName string) (string, error) {
 	container, err := findWebContainer(wp.Pod.Spec)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
 	for _, envVar := range container.Env {
 		if envVar.Name == paramName {
 			secretName, key, err := wp.secretForParam(container, envVar.Value)
 			if err != nil {
-				return "", true, err
+				return "", err
 			}
-			val, err := wp.Client.GetSecret(secretName, key)
-			return val, true, err
+			return wp.Client.GetSecret(secretName, key)
 		}
 	}
-	return "", false,
-		fmt.Errorf("container '%s' does not have '%s' specified",
-			container.Name,
-			paramName,
-		)
+	return "", nil
 }
 
 func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue string) (string, string, error) {
@@ -309,6 +270,7 @@ func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue strin
 	for _, vm := range container.VolumeMounts {
 		if strings.HasPrefix(paramValue, vm.MountPath) {
 			volumeMount = &vm
+			break
 		}
 	}
 	if volumeMount == nil {
@@ -317,13 +279,18 @@ func (wp *K8sWebPod) secretForParam(container corev1.Container, paramValue strin
 			paramValue,
 		)
 	}
-	var volume corev1.Volume
-	// TODO: test when this fails -- an exotic k8s error?
-	// find the Volume referenced by volumeMount
+	var volume *corev1.Volume
 	for _, v := range wp.Pod.Spec.Volumes {
 		if v.Name == volumeMount.Name {
-			volume = v
+			volume = &v
+			break
 		}
+	}
+	if volume == nil {
+		return "", "", fmt.Errorf(
+			"pod has no volume named '%s'",
+			volumeMount.Name,
+		)
 	}
 	// TODO: test when this fails -- maybe filesystem paths don't get
 	// constructed quite how you imagine? symlinks!?

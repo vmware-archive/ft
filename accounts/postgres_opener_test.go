@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"time"
 
 	"github.com/concourse/ft/accounts"
 	"github.com/stretchr/testify/require"
@@ -117,9 +118,7 @@ func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
 		PodName: "pod-name",
 	}
 
-	db, err := opener.Open()
-	s.NoError(err)
-	err = db.Ping()
+	_, err := opener.Open()
 	s.NoError(err)
 }
 
@@ -127,12 +126,17 @@ func (s *PostgresOpenerSuite) generateKeyPair() ([]byte, []byte) {
 	priv, err := rsa.GenerateKey(rand.Reader, 4096)
 	s.NoError(err)
 
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	s.NoError(err)
 
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
@@ -168,9 +172,7 @@ func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
 		PodName: "pod-name",
 	}
 
-	db, err := opener.Open()
-	s.NoError(err)
-	err = db.Ping()
+	_, err = opener.Open()
 	s.NoError(err)
 }
 
@@ -306,6 +308,10 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
 				Name:      volumeName,
 				MountPath: "/postgres-keys",
 			},
+			{
+				Name:      "some-other-volume",
+				MountPath: "/some/other/path",
+			},
 		},
 	}
 	volume := corev1.Volume{Name: volumeName,
@@ -325,7 +331,10 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
 		Pod: &corev1.Pod{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{container},
-				Volumes:    []corev1.Volume{volume},
+				Volumes: []corev1.Volume{
+					volume,
+					{Name: "another-volume"},
+				},
 			},
 		},
 		Client: &testk8sClient{
@@ -337,7 +346,7 @@ func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
 		},
 	}
 
-	fileContents, _, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
+	fileContents, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
 	s.NoError(err)
 	s.Equal(fileContents, "ssl cert")
 }
@@ -473,7 +482,7 @@ func (twp *testWebPod) PostgresParam(param string) (string, error) {
 	return val, nil
 }
 
-func (twp *testWebPod) PostgresFile(param string) (string, bool, error) {
+func (twp *testWebPod) PostgresFile(param string) (string, error) {
 	var val string
 	switch param {
 	case "CONCOURSE_POSTGRES_CA_CERT":
@@ -484,9 +493,9 @@ func (twp *testWebPod) PostgresFile(param string) (string, bool, error) {
 		val = twp.sslkey
 	}
 	if val != "" {
-		return val, true, nil
+		return val, nil
 	}
-	return "", false, errors.New("foobar")
+	return "", nil
 }
 
 func (twp *testWebPod) Name() string {
@@ -500,8 +509,8 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingHost() {
 		password: "password",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 	_, err := opener.Connection(pod)
 	s.Error(err)
@@ -514,8 +523,8 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingUser() {
 		password: "password",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 	_, err := opener.Connection(pod)
 	s.Error(err)
@@ -528,8 +537,8 @@ func (s *PostgresOpenerSuite) TestFailsWithMissingPassword() {
 		user: "user",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 	_, err := opener.Connection(pod)
 	s.Error(err)
@@ -543,8 +552,8 @@ func (s *PostgresOpenerSuite) TestOmitsPortWhenUnspecified() {
 		password: "password",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 	connection, err := opener.Connection(pod)
 	s.NoError(err)
@@ -563,8 +572,8 @@ func (s *PostgresOpenerSuite) TestReadsSSLMode() {
 		sslmode:  "verify-ca",
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 	connection, err := opener.Connection(pod)
 	s.NoError(err)
@@ -609,8 +618,8 @@ func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 	}
 
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 
 	_, err := opener.Connection(pod)
@@ -655,8 +664,8 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
 	}
 
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
 
 	_, err := opener.Connection(pod)
@@ -666,28 +675,12 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
 	)
 }
 
-func (s *PostgresOpenerSuite) TestFailsWhenClientKeyLookupErrors() {
+func (s *PostgresOpenerSuite) TestPostgresFileFailsWithoutMatchingMount() {
 	container := corev1.Container{
 		Name: "helm-release-web",
 		Env: []corev1.EnvVar{
 			{
-				Name:  "CONCOURSE_POSTGRES_HOST",
-				Value: "example.com",
-			},
-			{
-				Name:  "CONCOURSE_POSTGRES_USER",
-				Value: "postgres",
-			},
-			{
-				Name:  "CONCOURSE_POSTGRES_PASSWORD",
-				Value: "password",
-			},
-			{
-				Name:  "CONCOURSE_POSTGRES_SSLMODE",
-				Value: "verify-ca",
-			},
-			{
-				Name:  "CONCOURSE_POSTGRES_CLIENT_KEY",
+				Name:  "SOME_FILE",
 				Value: "/postgres-keys/client.key",
 			},
 		},
@@ -700,15 +693,41 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientKeyLookupErrors() {
 		},
 	}
 
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
-	}
-
-	_, err := opener.Connection(pod)
+	_, err := pod.PostgresFile("SOME_FILE")
 	s.EqualError(
 		err,
 		"container has no volume mounts matching '/postgres-keys/client.key'",
+	)
+}
+
+func (s *PostgresOpenerSuite) TestPostgresFileFailsWithoutMatchingVolume() {
+	container := corev1.Container{
+		Name: "helm-release-web",
+		Env: []corev1.EnvVar{
+			{
+				Name:  "SOME_FILE",
+				Value: "/postgres-keys/client.key",
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "nonexistent-volume",
+				MountPath: "/postgres-keys",
+			},
+		},
+	}
+	pod := &accounts.K8sWebPod{
+		Pod: &corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{container},
+			},
+		},
+	}
+
+	_, err := pod.PostgresFile("SOME_FILE")
+	s.EqualError(
+		err,
+		"pod has no volume named 'nonexistent-volume'",
 	)
 }
 
@@ -731,11 +750,9 @@ func (s *PostgresOpenerSuite) TestReadsClientTLSWithoutRootCert() {
 		sslrootcert: string(certBlock),
 	}
 	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:    pod,
-		PodName:   "pod-name",
+		WebPod:  pod,
+		PodName: "pod-name",
 	}
-	db, err := opener.Open()
-	s.NoError(err)
-	err = db.Ping()
+	_, err = opener.Open()
 	s.NoError(err)
 }
