@@ -15,7 +15,7 @@ require (
 	github.com/cppforlife/go-semi-semantic v0.0.0-20160921010311-576b6af77ae4
 	github.com/fatih/color v1.7.0
 	github.com/go-sql-driver/mysql v1.4.1 // indirect
-	github.com/lib/pq v1.3.0
+	github.com/jessevdk/go-flags v1.4.0
 	github.com/mattn/go-sqlite3 v1.11.0 // indirect
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.2.3
 	github.com/onsi/ginkgo v1.13.0 // indirect

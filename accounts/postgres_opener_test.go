@@ -9,40 +9,19 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
-	"io"
 	"math/big"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"time"
 
 	"github.com/concourse/ft/accounts"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	restclient "k8s.io/client-go/rest"
-	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
-	"k8s.io/kubectl/pkg/scheme"
 )
 
 type PostgresOpenerSuite struct {
 	suite.Suite
 	*require.Assertions
-}
-
-type testk8sClient struct {
-	pod     accounts.WebPod
-	secrets map[string]map[string]string
-}
-
-func (tkc *testk8sClient) GetPod(name string) (*corev1.Pod, error) {
-	return nil, nil
-}
-
-func (tkc *testk8sClient) GetSecret(name, key string) (string, error) {
-	return tkc.secrets[name][key], nil
 }
 
 func (s *PostgresOpenerSuite) fakePostgres(tlsConf *tls.Config) (string, net.Listener) {
@@ -104,18 +83,99 @@ func (s *PostgresOpenerSuite) fakePostgres(tlsConf *tls.Config) (string, net.Lis
 	return port, ln
 }
 
+type testWebNode struct {
+	name        string
+	host        string
+	port        string
+	user        string
+	password    string
+	sslmode     string
+	sslrootcert string
+	sslkey      string
+	sslcert     string
+	valueError  bool
+}
+
+func (twp *testWebNode) PostgresParamNames() ([]string, error) {
+	names := []string{}
+	if twp.host != "" {
+		names = append(names, "CONCOURSE_POSTGRES_HOST")
+	}
+	if twp.port != "" {
+		names = append(names, "CONCOURSE_POSTGRES_PORT")
+	}
+	if twp.user != "" {
+		names = append(names, "CONCOURSE_POSTGRES_USER")
+	}
+	if twp.password != "" {
+		names = append(names, "CONCOURSE_POSTGRES_PASSWORD")
+	}
+	if twp.sslmode != "" {
+		names = append(names, "CONCOURSE_POSTGRES_SSLMODE")
+	}
+	if twp.sslrootcert != "" {
+		names = append(names, "CONCOURSE_POSTGRES_CA_CERT")
+	}
+	if twp.sslcert != "" {
+		names = append(names, "CONCOURSE_POSTGRES_CLIENT_CERT")
+	}
+	if twp.sslkey != "" {
+		names = append(names, "CONCOURSE_POSTGRES_CLIENT_KEY")
+	}
+	return names, nil
+}
+
+func (twp *testWebNode) ValueFromEnvVar(param string) (string, error) {
+	if twp.valueError {
+		return "", errors.New("foobar")
+	}
+	var val string
+	switch param {
+	case "CONCOURSE_POSTGRES_HOST":
+		val = twp.host
+	case "CONCOURSE_POSTGRES_PORT":
+		val = twp.port
+	case "CONCOURSE_POSTGRES_USER":
+		val = twp.user
+	case "CONCOURSE_POSTGRES_PASSWORD":
+		val = twp.password
+	case "CONCOURSE_POSTGRES_SSLMODE":
+		val = twp.sslmode
+	}
+	if val == "" {
+		return "", errors.New("foobar")
+	}
+	return val, nil
+}
+
+func (twp *testWebNode) FileContentsFromEnvVar(param string) (string, error) {
+	var val string
+	switch param {
+	case "CONCOURSE_POSTGRES_CA_CERT":
+		val = twp.sslrootcert
+	case "CONCOURSE_POSTGRES_CLIENT_CERT":
+		val = twp.sslcert
+	case "CONCOURSE_POSTGRES_CLIENT_KEY":
+		val = twp.sslkey
+	}
+	if val != "" {
+		return val, nil
+	}
+	return "", nil
+}
+
 func (s *PostgresOpenerSuite) TestInfersPostgresConnectionFromWebNode() {
 	port, pg := s.fakePostgres(nil)
 	defer pg.Close()
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod: &testWebPod{
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: &testWebNode{
 			name:     "helm-release-web",
 			host:     "127.0.0.1",
 			port:     port,
 			user:     "postgres",
 			password: "password",
 		},
-		PodName: "pod-name",
+		FileTracker: &accounts.TmpfsTracker{},
 	}
 
 	_, err := opener.Open()
@@ -159,8 +219,8 @@ func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
 	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
 	port, pg := s.fakePostgres(tlsConf)
 	defer pg.Close()
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod: &testWebPod{
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: &testWebNode{
 			name:        "helm-release-web",
 			host:        "127.0.0.1",
 			port:        port,
@@ -169,418 +229,87 @@ func (s *PostgresOpenerSuite) TestInfersTLSConfigFromWebNode() {
 			sslmode:     "verify-ca",
 			sslrootcert: string(certBlock),
 		},
-		PodName: "pod-name",
+		FileTracker: &accounts.TmpfsTracker{},
 	}
 
 	_, err = opener.Open()
 	s.NoError(err)
 }
 
-func (s *PostgresOpenerSuite) fakeAPI(path string, obj runtime.Object) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch p, m := r.URL.Path, r.Method; {
-		case p == path && m == "GET":
-			body := cmdtesting.ObjBody(
-				scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...),
-				obj,
-			)
-			for k, vals := range cmdtesting.DefaultHeader() {
-				for _, v := range vals {
-					w.Header().Add(k, v)
-				}
-			}
-			io.Copy(w, body)
-		default:
-			s.Failf("unexpected request", "%#v\n%#v", r.URL, r)
-		}
-	}))
-}
-
-// TODO split out a separate k8s-related suite
-func (s *PostgresOpenerSuite) TestGetPodFindsPod() {
-	namespace := "namespace"
-	podName := "pod-name"
-	podSpec := corev1.PodSpec{
-		RestartPolicy: corev1.RestartPolicyAlways,
-		DNSPolicy:     corev1.DNSClusterFirst,
-		Containers: []corev1.Container{
-			{
-				Name: "helm-release-web",
-				Env: []corev1.EnvVar{
-					{
-						Name:  "CONCOURSE_POSTGRES_HOST",
-						Value: "example.com",
-					},
-				},
-			},
-		},
-	}
-	fakeAPI := s.fakeAPI(
-		"/api/v1/namespaces/"+namespace+"/pods/"+podName,
-		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            podName,
-				Namespace:       namespace,
-				ResourceVersion: "10",
-			},
-			Spec: podSpec,
-			Status: corev1.PodStatus{
-				Phase: corev1.PodRunning,
-			},
-		},
-	)
-	defer fakeAPI.Close()
-	restConfig := &restclient.Config{
-		Host:    fakeAPI.URL,
-		APIPath: "/api",
-		ContentConfig: restclient.ContentConfig{
-			NegotiatedSerializer: scheme.Codecs,
-			ContentType:          runtime.ContentTypeJSON,
-			GroupVersion:         &corev1.SchemeGroupVersion,
-		},
-	}
-	client := accounts.NewK8sClient(restConfig, namespace)
-
-	pod, err := client.GetPod(podName)
+func (s *PostgresOpenerSuite) TestCleansUpFiles() {
+	certBlock, keyBlock := s.generateKeyPair()
+	cert, err := tls.X509KeyPair(certBlock, keyBlock)
 	s.NoError(err)
-	webPod := &accounts.K8sWebPod{Pod: pod}
-	host, err := webPod.PostgresParam("CONCOURSE_POSTGRES_HOST")
-	s.NoError(err)
-	s.Equal(host, "example.com")
+	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
+	port, pg := s.fakePostgres(tlsConf)
+	defer pg.Close()
+	tracker := &accounts.TmpfsTracker{}
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: &testWebNode{
+			name:        "helm-release-web",
+			host:        "127.0.0.1",
+			port:        port,
+			user:        "postgres",
+			password:    "password",
+			sslmode:     "verify-ca",
+			sslrootcert: string(certBlock),
+		},
+		FileTracker: tracker,
+	}
+
+	_, err = opener.Open()
+	s.Equal(0, tracker.Count(), "tempfiles must be deleted")
 }
 
-func (s *PostgresOpenerSuite) TestWebPodPostgresParamLooksUpSecret() {
-	secretName := "secret-name"
-	secretKey := "postgresql-user"
-	secretKeyRef := &corev1.SecretKeySelector{
-		LocalObjectReference: corev1.LocalObjectReference{
-			Name: secretName,
-		},
-		Key: secretKey,
-	}
-	env := []corev1.EnvVar{
-		{
-			Name: "CONCOURSE_POSTGRES_USER",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: secretKeyRef,
-			},
-		},
-	}
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name: "helm-release-web",
-						Env:  env,
-					},
-				},
-			},
-		},
-		Client: &testk8sClient{
-			secrets: map[string]map[string]string{
-				secretName: map[string]string{
-					secretKey: "username",
-				},
-			},
-		},
-	}
-
-	userParam, err := pod.PostgresParam("CONCOURSE_POSTGRES_USER")
-	s.NoError(err)
-	s.Equal(userParam, "username")
-}
-
-func (s *PostgresOpenerSuite) TestWebPodPostgresParamGetsCertFromSecret() {
-	secretName := "secret-name"
-	secretKey := "postgresql-ca-cert"
-	volumeName := "keys-volume"
-	container := corev1.Container{
-		Name: "helm-release-web",
-		Env: []corev1.EnvVar{
-			{
-				Name:  "CONCOURSE_POSTGRES_CA_CERT",
-				Value: "/postgres-keys/ca.cert",
-			},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      volumeName,
-				MountPath: "/postgres-keys",
-			},
-			{
-				Name:      "some-other-volume",
-				MountPath: "/some/other/path",
-			},
-		},
-	}
-	volume := corev1.Volume{Name: volumeName,
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: secretName,
-				Items: []corev1.KeyToPath{
-					{
-						Key:  secretKey,
-						Path: "ca.cert",
-					},
-				},
-			},
-		},
-	}
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{container},
-				Volumes: []corev1.Volume{
-					volume,
-					{Name: "another-volume"},
-				},
-			},
-		},
-		Client: &testk8sClient{
-			secrets: map[string]map[string]string{
-				secretName: map[string]string{
-					secretKey: "ssl cert",
-				},
-			},
-		},
-	}
-
-	fileContents, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
-	s.NoError(err)
-	s.Equal(fileContents, "ssl cert")
-}
-
-func (s *PostgresOpenerSuite) TestK8sClientLooksUpSecrets() {
-	namespace := "namespace"
-	secretName := "secret-name"
-	fakeAPI := s.fakeAPI(
-		"/api/v1/namespaces/"+namespace+"/secrets/"+secretName,
-		&corev1.Secret{
-			Data: map[string][]byte{
-				"postgresql-user": []byte("user"),
-			},
-		},
-	)
-	defer fakeAPI.Close()
-	restConfig := &restclient.Config{
-		Host:    fakeAPI.URL,
-		APIPath: "/api",
-		ContentConfig: restclient.ContentConfig{
-			NegotiatedSerializer: scheme.Codecs,
-			ContentType:          runtime.ContentTypeJSON,
-			GroupVersion:         &corev1.SchemeGroupVersion,
-		},
-	}
-	client := accounts.NewK8sClient(restConfig, namespace)
-	val, err := client.GetSecret(secretName, "postgresql-user")
-	s.NoError(err)
-	s.Equal(val, "user")
-}
-
-func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithNoContainers() {
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{},
-			},
-		},
-	}
-	_, err := pod.PostgresParam("param")
-	s.EqualError(err, "could not find a 'web' container")
-}
-
-func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithoutWebContainer() {
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name: "not-the-right-container",
-					},
-				},
-			},
-		},
-	}
-	_, err := pod.PostgresParam("param")
-	s.EqualError(err, "could not find a 'web' container")
-}
-
-func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMultipleWebContainers() {
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name: "web",
-					},
-					{
-						Name: "also-web",
-					},
-				},
-			},
-		},
-	}
-	_, err := pod.PostgresParam("param")
-	s.EqualError(
-		err,
-		"found multiple 'web' containers",
-	)
-}
-
-func (s *PostgresOpenerSuite) TestWebPodPostgresParamFailsWithMissingParam() {
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name: "not-the-right-container",
-					},
-					{
-						Name: "web",
-					},
-				},
-			},
-		},
-	}
-	_, err := pod.PostgresParam("PARAM")
-	s.EqualError(
-		err,
-		"container 'web' does not have 'PARAM' specified",
-	)
-}
-
-type testWebPod struct {
-	name        string
-	host        string
-	port        string
-	user        string
-	password    string
-	sslmode     string
-	sslrootcert string
-	sslkey      string
-	sslcert     string
-}
-
-func (twp *testWebPod) PostgresParam(param string) (string, error) {
-	var val string
-	switch param {
-	case "CONCOURSE_POSTGRES_HOST":
-		val = twp.host
-	case "CONCOURSE_POSTGRES_PORT":
-		val = twp.port
-	case "CONCOURSE_POSTGRES_USER":
-		val = twp.user
-	case "CONCOURSE_POSTGRES_PASSWORD":
-		val = twp.password
-	case "CONCOURSE_POSTGRES_SSLMODE":
-		val = twp.sslmode
-	}
-	if val == "" {
-		return "", errors.New("foobar")
-	}
-	return val, nil
-}
-
-func (twp *testWebPod) PostgresFile(param string) (string, error) {
-	var val string
-	switch param {
-	case "CONCOURSE_POSTGRES_CA_CERT":
-		val = twp.sslrootcert
-	case "CONCOURSE_POSTGRES_CLIENT_CERT":
-		val = twp.sslcert
-	case "CONCOURSE_POSTGRES_CLIENT_KEY":
-		val = twp.sslkey
-	}
-	if val != "" {
-		return val, nil
-	}
-	return "", nil
-}
-
-func (twp *testWebPod) Name() string {
-	return twp.name
-}
-
-func (s *PostgresOpenerSuite) TestFailsWithMissingHost() {
-	pod := &testWebPod{
-		name:     "web",
-		user:     "user",
-		password: "password",
-	}
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
-	}
-	_, err := opener.Connection(pod)
-	s.Error(err)
-}
-
-func (s *PostgresOpenerSuite) TestFailsWithMissingUser() {
-	pod := &testWebPod{
-		name:     "web",
-		host:     "host",
-		password: "password",
-	}
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
-	}
-	_, err := opener.Connection(pod)
-	s.Error(err)
-}
-
-func (s *PostgresOpenerSuite) TestFailsWithMissingPassword() {
-	pod := &testWebPod{
-		name: "web",
-		host: "host",
-		user: "user",
-	}
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
-	}
-	_, err := opener.Connection(pod)
-	s.Error(err)
-}
-
-func (s *PostgresOpenerSuite) TestOmitsPortWhenUnspecified() {
-	pod := &testWebPod{
+func (s *PostgresOpenerSuite) TestUsesDefaultPortWhenUnspecified() {
+	pod := &testWebNode{
 		name:     "web",
 		host:     "1.2.3.4",
 		user:     "postgres",
 		password: "password",
 	}
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: pod,
 	}
-	connection, err := opener.Connection(pod)
+	postgresConfig, err := opener.PostgresConfig()
 	s.NoError(err)
-	s.Equal(
-		connection.String(),
-		"host=1.2.3.4 user=postgres password=password sslmode=disable",
+	s.Contains(
+		postgresConfig.ConnectionString(),
+		"port=5432",
 	)
 }
 
 func (s *PostgresOpenerSuite) TestReadsSSLMode() {
-	pod := &testWebPod{
+	pod := &testWebNode{
 		name:     "web",
 		host:     "1.2.3.4",
 		user:     "postgres",
 		password: "password",
 		sslmode:  "verify-ca",
 	}
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: pod,
 	}
-	connection, err := opener.Connection(pod)
+	postgresConfig, err := opener.PostgresConfig()
 	s.NoError(err)
-	s.Equal(
-		connection.String(),
-		"host=1.2.3.4 user=postgres password=password sslmode=verify-ca",
+	s.Contains(
+		postgresConfig.ConnectionString(),
+		"sslmode='verify-ca'",
 	)
+}
+
+func (s *PostgresOpenerSuite) TestFailsWhenValueLookupErrors() {
+	pod := &testWebNode{
+		host:       "1.2.3.4",
+		valueError: true,
+	}
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: pod,
+	}
+
+	_, err := opener.PostgresConfig()
+
+	s.EqualError(err, "foobar")
 }
 
 func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
@@ -617,12 +346,11 @@ func (s *PostgresOpenerSuite) TestFailsWhenRootCertLookupErrors() {
 		},
 	}
 
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: pod,
 	}
 
-	_, err := opener.Connection(pod)
+	_, err := opener.PostgresConfig()
 	s.EqualError(
 		err,
 		"container has no volume mounts matching '/postgres-keys/ca.cert'",
@@ -663,82 +391,25 @@ func (s *PostgresOpenerSuite) TestFailsWhenClientCertLookupErrors() {
 		},
 	}
 
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode: pod,
 	}
 
-	_, err := opener.Connection(pod)
+	_, err := opener.PostgresConfig()
 	s.EqualError(
 		err,
 		"container has no volume mounts matching '/postgres-keys/client.cert'",
 	)
 }
 
-func (s *PostgresOpenerSuite) TestPostgresFileFailsWithoutMatchingMount() {
-	container := corev1.Container{
-		Name: "helm-release-web",
-		Env: []corev1.EnvVar{
-			{
-				Name:  "SOME_FILE",
-				Value: "/postgres-keys/client.key",
-			},
-		},
-	}
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{container},
-			},
-		},
-	}
-
-	_, err := pod.PostgresFile("SOME_FILE")
-	s.EqualError(
-		err,
-		"container has no volume mounts matching '/postgres-keys/client.key'",
-	)
-}
-
-func (s *PostgresOpenerSuite) TestPostgresFileFailsWithoutMatchingVolume() {
-	container := corev1.Container{
-		Name: "helm-release-web",
-		Env: []corev1.EnvVar{
-			{
-				Name:  "SOME_FILE",
-				Value: "/postgres-keys/client.key",
-			},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "nonexistent-volume",
-				MountPath: "/postgres-keys",
-			},
-		},
-	}
-	pod := &accounts.K8sWebPod{
-		Pod: &corev1.Pod{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{container},
-			},
-		},
-	}
-
-	_, err := pod.PostgresFile("SOME_FILE")
-	s.EqualError(
-		err,
-		"pod has no volume named 'nonexistent-volume'",
-	)
-}
-
-func (s *PostgresOpenerSuite) TestReadsClientTLSWithoutRootCert() {
+func (s *PostgresOpenerSuite) TestInfersClientTLSConfigFromWebNode() {
 	certBlock, keyBlock := s.generateKeyPair()
 	cert, err := tls.X509KeyPair(certBlock, keyBlock)
 	s.NoError(err)
 	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
 	port, pg := s.fakePostgres(tlsConf)
 	defer pg.Close()
-	pod := &testWebPod{
+	pod := &testWebNode{
 		name:        "web",
 		host:        "127.0.0.1",
 		port:        port,
@@ -749,9 +420,9 @@ func (s *PostgresOpenerSuite) TestReadsClientTLSWithoutRootCert() {
 		sslcert:     string(certBlock),
 		sslrootcert: string(certBlock),
 	}
-	opener := &accounts.K8sWebNodeInferredPostgresOpener{
-		WebPod:  pod,
-		PodName: "pod-name",
+	opener := &accounts.WebNodeInferredPostgresOpener{
+		WebNode:     pod,
+		FileTracker: &accounts.TmpfsTracker{},
 	}
 	_, err = opener.Open()
 	s.NoError(err)

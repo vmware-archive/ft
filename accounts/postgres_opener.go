@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/concourse/flag"
+	"github.com/jessevdk/go-flags"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -29,9 +30,9 @@ func (spo *StaticPostgresOpener) Open() (*sql.DB, error) {
 	return sql.Open("postgres", spo.ConnectionString())
 }
 
-type K8sWebNodeInferredPostgresOpener struct {
-	WebPod  WebPod
-	PodName string
+type WebNodeInferredPostgresOpener struct {
+	WebNode     WebNode
+	FileTracker FileTracker
 }
 
 type K8sClient interface {
@@ -75,13 +76,50 @@ func NewK8sClient(restConfig *rest.Config, namespace string) K8sClient {
 	}
 }
 
-func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
-	pgConn, err := kwnipo.Connection(kwnipo.WebPod)
+type FileTracker interface {
+	Write(string) (string, error)
+	Clear()
+}
+
+type TmpfsTracker struct {
+	filenames []string
+}
+
+func (tt *TmpfsTracker) Write(contents string) (string, error) {
+	tmpfile, err := ioutil.TempFile("", "")
+	if err != nil {
+		return "", err
+	}
+	_, err = tmpfile.Write([]byte(contents))
+	if err != nil {
+		return "", err
+	}
+	err = tmpfile.Close()
+	if err != nil {
+		return "", err
+	}
+	tt.filenames = append(tt.filenames, tmpfile.Name())
+	return tmpfile.Name(), nil
+}
+
+func (tt *TmpfsTracker) Clear() {
+	for _, file := range tt.filenames {
+		os.Remove(file)
+	}
+	tt.filenames = nil
+}
+
+func (tt *TmpfsTracker) Count() int {
+	return len(tt.filenames)
+}
+
+func (wnipo *WebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
+	postgresConfig, err := wnipo.PostgresConfig()
 	if err != nil {
 		return nil, err
 	}
-	defer pgConn.CleanupTempFiles()
-	db, err := sql.Open("postgres", pgConn.String())
+	defer wnipo.FileTracker.Clear()
+	db, err := sql.Open("postgres", postgresConfig.ConnectionString())
 	if err != nil {
 		return nil, err
 	}
@@ -92,75 +130,68 @@ func (kwnipo *K8sWebNodeInferredPostgresOpener) Open() (*sql.DB, error) {
 	return db, nil
 }
 
-// k8s API impl vs CRI exec impl
-// corev1.Pod       spdyconn
-type WebPod interface { // TODO rename WebNode -- should not be k8s-specific
-	PostgresParam(string) (string, error)
-	PostgresFile(string) (string, error)
+type WebNode interface {
+	PostgresParamNames() ([]string, error)
+	ValueFromEnvVar(string) (string, error)
+	FileContentsFromEnvVar(string) (string, error)
 }
 
-func (kwnipo *K8sWebNodeInferredPostgresOpener) Connection(
-	pod WebPod,
-) (*PostgresConnection, error) {
-	conn := PostgresConnection{}
-	var err error
-	conn.host, err = pod.PostgresParam("CONCOURSE_POSTGRES_HOST")
-	if err != nil {
-		return nil, err
+func isFile(paramName string) bool {
+	switch paramName {
+	case "CONCOURSE_POSTGRES_CA_CERT",
+		"CONCOURSE_POSTGRES_CLIENT_CERT",
+		"CONCOURSE_POSTGRES_CLIENT_KEY":
+		return true
+	default:
+		return false
 	}
-	// TODO why isn't there error handling here? (hint: there is a default)
-	conn.port, _ = pod.PostgresParam("CONCOURSE_POSTGRES_PORT")
-	conn.user, err = pod.PostgresParam("CONCOURSE_POSTGRES_USER")
-	if err != nil {
-		return nil, err
-	}
-	conn.password, err = pod.PostgresParam("CONCOURSE_POSTGRES_PASSWORD")
-	if err != nil {
-		return nil, err
-	}
-	conn.sslmode, err = pod.PostgresParam("CONCOURSE_POSTGRES_SSLMODE")
-	if err != nil {
-		conn.sslmode = "disable"
-	}
-
-	err = conn.determineRootCert(pod)
-	if err != nil {
-		return nil, err
-	}
-	sslcert, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_CERT")
-	if err != nil {
-		return nil, err
-	}
-	sslkey, err := pod.PostgresFile("CONCOURSE_POSTGRES_CLIENT_KEY")
-	if err != nil {
-		return nil, err
-	}
-	if sslcert != "" && sslkey != "" {
-		conn.sslcert, err = tempfileFromString(sslcert)
-		if err != nil {
-			return nil, err
-		}
-		conn.sslkey, err = tempfileFromString(sslkey)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &conn, nil
 }
 
-func (pc *PostgresConnection) determineRootCert(pod WebPod) error {
-	sslrootcert, err := pod.PostgresFile("CONCOURSE_POSTGRES_CA_CERT")
-	if err != nil {
-		return err
-	}
-	if sslrootcert != "" {
-		pc.sslrootcert, err = tempfileFromString(sslrootcert)
+func toFlagName(paramName string) string {
+	return "--" + strings.Replace(
+		strings.ToLower(
+			strings.TrimPrefix(paramName, "CONCOURSE_POSTGRES_"),
+		),
+		"_", "-", -1,
+	)
+}
+
+func (wnipo *WebNodeInferredPostgresOpener) PostgresConfig() (flag.PostgresConfig, error) {
+	postgresConfig := flag.PostgresConfig{}
+	args := []string{}
+	paramNames, _ := wnipo.WebNode.PostgresParamNames()
+	for _, postgresParam := range paramNames {
+		value, err := wnipo.toFlagValue(postgresParam)
 		if err != nil {
-			return err
+			return postgresConfig, err
+		}
+		args = append(args, toFlagName(postgresParam), value)
+	}
+	flags.ParseArgs(&postgresConfig, args)
+	return postgresConfig, nil
+}
+
+func (wnipo *WebNodeInferredPostgresOpener) toFlagValue(
+	paramName string,
+) (string, error) {
+	var value string
+	if isFile(paramName) {
+		contents, err := wnipo.WebNode.FileContentsFromEnvVar(paramName)
+		if err != nil {
+			return "", err
+		}
+		value, err = wnipo.FileTracker.Write(contents)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		var err error
+		value, err = wnipo.WebNode.ValueFromEnvVar(paramName)
+		if err != nil {
+			return "", err
 		}
 	}
-	return nil
+	return value, nil
 }
 
 func tempfileFromString(contents string) (string, error) {
@@ -179,58 +210,26 @@ func tempfileFromString(contents string) (string, error) {
 	return tmpfile.Name(), nil
 }
 
-func (pc *PostgresConnection) CleanupTempFiles() {
-	if pc.sslrootcert != "" {
-		os.Remove(pc.sslrootcert)
-	}
-	if pc.sslcert != "" {
-		os.Remove(pc.sslcert)
-	}
-	if pc.sslkey != "" {
-		os.Remove(pc.sslkey)
-	}
-}
-
-// TODO what if the database is different from the user
-// TODO what about connection timeout
-
-type PostgresConnection struct {
-	host        string
-	port        string
-	user        string
-	password    string
-	sslmode     string
-	sslrootcert string
-	sslcert     string
-	sslkey      string
-}
-
-func (pc *PostgresConnection) String() string {
-	parts := []string{"host=" + pc.host}
-	if pc.port != "" {
-		parts = append(parts, "port="+pc.port)
-	}
-	parts = append(parts, "user="+pc.user)
-	parts = append(parts, "password="+pc.password)
-	parts = append(parts, "sslmode="+pc.sslmode)
-	if pc.sslrootcert != "" {
-		parts = append(parts, "sslrootcert="+pc.sslrootcert)
-	}
-	if pc.sslcert != "" {
-		parts = append(parts, "sslcert="+pc.sslcert)
-	}
-	if pc.sslkey != "" {
-		parts = append(parts, "sslkey="+pc.sslkey)
-	}
-	return strings.Join(parts, " ")
-}
-
 type K8sWebPod struct {
 	Pod    *corev1.Pod
 	Client K8sClient
 }
 
-func (wp *K8sWebPod) PostgresParam(paramName string) (string, error) {
+func (wp *K8sWebPod) PostgresParamNames() ([]string, error) {
+	container, err := findWebContainer(wp.Pod.Spec)
+	if err != nil {
+		return nil, err
+	}
+	names := []string{}
+	for _, envVar := range container.Env {
+		if strings.HasPrefix(envVar.Name, "CONCOURSE_POSTGRES_") {
+			names = append(names, envVar.Name)
+		}
+	}
+	return names, nil
+}
+
+func (wp *K8sWebPod) ValueFromEnvVar(paramName string) (string, error) {
 	container, err := findWebContainer(wp.Pod.Spec)
 	if err != nil {
 		return "", err
@@ -247,7 +246,7 @@ func (wp *K8sWebPod) PostgresParam(paramName string) (string, error) {
 		)
 }
 
-func (wp *K8sWebPod) PostgresFile(paramName string) (string, error) {
+func (wp *K8sWebPod) FileContentsFromEnvVar(paramName string) (string, error) {
 	container, err := findWebContainer(wp.Pod.Spec)
 	if err != nil {
 		return "", err

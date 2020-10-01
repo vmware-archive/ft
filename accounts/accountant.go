@@ -21,9 +21,9 @@ var DefaultAccountantFactory = func(cmd Command) (Accountant, error) {
 		if err != nil {
 			return nil, err
 		}
-		opener = &K8sWebNodeInferredPostgresOpener{
-			WebPod:    &K8sWebPod{Pod: pod, Client: k8sClient},
-			PodName:   cmd.WebK8sPod,
+		opener = &WebNodeInferredPostgresOpener{
+			WebNode: &K8sWebPod{Pod: pod, Client: k8sClient},
+			FileTracker: &TmpfsTracker{},
 		}
 	} else {
 		opener = &StaticPostgresOpener{cmd.Postgres}
