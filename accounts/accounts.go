@@ -111,15 +111,16 @@ func printSamples(writer io.Writer, samples []Sample) error {
 			workloads = append(workloads, w.ToString())
 		}
 		data = append(data, ui.TableRow{
-			ui.TableCell{Contents: sample.Container.Handle},
-			ui.TableCell{Contents: string(sample.Labels.Type)},
 			ui.TableCell{Contents: strings.Join(workloads, ",")},
+			ui.TableCell{Contents: string(sample.Labels.Type)},
+			ui.TableCell{Contents: humanReadable(sample.Container.Stats.Memory)},
+			ui.TableCell{Contents: sample.Container.Handle},
 		})
 	}
 	table := ui.Table{
 		Headers: ui.TableRow{
 			ui.TableCell{
-				Contents: "handle",
+				Contents: "workloads",
 				Color:    color.New(color.Bold),
 			},
 			ui.TableCell{
@@ -127,13 +128,30 @@ func printSamples(writer io.Writer, samples []Sample) error {
 				Color:    color.New(color.Bold),
 			},
 			ui.TableCell{
-				Contents: "workloads",
+				Contents: "memory",
+				Color:    color.New(color.Bold),
+			},
+			ui.TableCell{
+				Contents: "handle",
 				Color:    color.New(color.Bold),
 			},
 		},
 		Data: data,
 	}
 	return table.Render(writer, true)
+}
+
+func humanReadable(bytes uint64) string {
+	KB := uint64(1) << 10
+	MB := KB << 10
+	switch {
+	case bytes > MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes / MB) + float64(bytes % MB)/float64(MB))
+	case bytes > KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes / KB) + float64(bytes % KB)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 type Sample struct {
@@ -158,6 +176,7 @@ type Container struct {
 }
 
 type Stats struct {
+	Memory uint64
 }
 
 // a Workload is a description of a concourse core concept that corresponds to

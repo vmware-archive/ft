@@ -25,6 +25,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 )
 
+// TODO replace real garden server with fake gardenconnection
+
 type LANWorkerSuite struct {
 	suite.Suite
 	*require.Assertions
@@ -52,9 +54,25 @@ func (s *LANWorkerSuite) TearDownTest() {
 }
 
 func (s *LANWorkerSuite) TestLANWorkerListsContainers() {
-	fakeContainer := new(gardenfakes.FakeContainer)
-	fakeContainer.HandleReturns("container-handle")
-	s.backend.ContainersReturns([]garden.Container{fakeContainer}, nil)
+	worker := accounts.GardenWorker{
+		Dialer: &accounts.LANGardenDialer{},
+	}
+	worker.Containers()
+
+	s.Equal(s.backend.ContainersCallCount(), 1)
+}
+
+func (s *LANWorkerSuite) TestLANWorkerGetsMemory() {
+	s.backend.BulkMetricsReturns(map[string]garden.ContainerMetricsEntry{
+		"container-handle": garden.ContainerMetricsEntry{
+			Metrics: garden.Metrics{
+				MemoryStat: garden.ContainerMemoryStat{
+					TotalUsageTowardLimit: 123,
+				},
+			},
+			Err: nil,
+		},
+	}, nil)
 
 	worker := accounts.GardenWorker{
 		Dialer: &accounts.LANGardenDialer{},
@@ -64,6 +82,7 @@ func (s *LANWorkerSuite) TestLANWorkerListsContainers() {
 	s.NoError(err)
 	s.Len(containers, 1)
 	s.Equal(containers[0].Handle, "container-handle")
+	s.Equal(uint64(123), containers[0].Stats.Memory)
 }
 
 type K8sGardenDialerSuite struct {

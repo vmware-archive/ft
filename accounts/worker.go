@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/garden/client/connection"
 	"code.cloudfoundry.org/lager"
 	v1 "k8s.io/api/core/v1"
@@ -21,19 +22,39 @@ type GardenWorker struct {
 	Dialer GardenDialer
 }
 
-func (gw *GardenWorker) Containers(opts ...StatsOption) ([]Container, error) {
-	handles, err := connection.NewWithDialerAndLogger(
+type GardenConnection struct {
+	Dialer GardenDialer
+}
+
+func (gc GardenConnection) AllMetrics() (map[string]garden.ContainerMetricsEntry, error) {
+	connection := connection.NewWithDialerAndLogger(
 		func(string, string) (net.Conn, error) {
-			return gw.Dialer.Dial()
+			return gc.Dialer.Dial()
 		},
 		lager.NewLogger("garden-connection"),
-	).List(nil)
+	)
+	handles, err := connection.List(nil)
+	if err != nil {
+		return nil, err
+	}
+	return connection.BulkMetrics(handles)
+}
+
+func (gw *GardenWorker) Containers(opts ...StatsOption) ([]Container, error) {
+	metricsEntries, err := GardenConnection{Dialer: gw.Dialer}.AllMetrics()
 	if err != nil {
 		return nil, err
 	}
 	containers := []Container{}
-	for _, handle := range handles {
-		containers = append(containers, Container{Handle: handle})
+	for handle, metricsEntry := range metricsEntries {
+		memory := metricsEntry.Metrics.MemoryStat.TotalUsageTowardLimit
+		containers = append(
+			containers,
+			Container{
+				Handle: handle,
+				Stats:  Stats{Memory: memory},
+			},
+		)
 	}
 	return containers, nil
 }

@@ -29,4 +29,7 @@ func TestAccounts(t *testing.T) {
 	suite.Run(t, &K8sClientSuite{
 		Assertions: require.New(t),
 	})
+	suite.Run(t, &GardenConnectionSuite{
+		Assertions: require.New(t),
+	})
 }
