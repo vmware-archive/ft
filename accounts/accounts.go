@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/c2h5oh/datasize"
 	"github.com/concourse/concourse/atc/db"
 	"github.com/concourse/concourse/fly/ui"
 	"github.com/concourse/flag"
@@ -142,16 +143,7 @@ func printSamples(writer io.Writer, samples []Sample) error {
 }
 
 func humanReadable(bytes uint64) string {
-	KB := uint64(1) << 10
-	MB := KB << 10
-	switch {
-	case bytes > MB:
-		return fmt.Sprintf("%.1f MB", float64(bytes / MB) + float64(bytes % MB)/float64(MB))
-	case bytes > KB:
-		return fmt.Sprintf("%.1f KB", float64(bytes / KB) + float64(bytes % KB)/float64(KB))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
+	return datasize.ByteSize(bytes).HumanReadable()
 }
 
 type Sample struct {

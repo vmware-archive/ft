@@ -8,6 +8,7 @@ require (
 	code.cloudfoundry.org/garden v0.0.0-20181108172608-62470dc86365
 	code.cloudfoundry.org/lager v2.0.0+incompatible
 	github.com/Masterminds/squirrel v1.1.0
+	github.com/c2h5oh/datasize v0.0.0-20200825124411-48ed595a09d2
 	github.com/concourse/baggageclaim v1.8.0
 	github.com/concourse/concourse v1.6.1-0.20200811134233-6fdc412c6b5a
 	github.com/concourse/flag v1.1.0

@@ -47,7 +47,9 @@ func (gw *GardenWorker) Containers(opts ...StatsOption) ([]Container, error) {
 	}
 	containers := []Container{}
 	for handle, metricsEntry := range metricsEntries {
-		memory := metricsEntry.Metrics.MemoryStat.TotalUsageTowardLimit
+		memory := metricsEntry.Metrics.MemoryStat.TotalRss +
+			metricsEntry.Metrics.MemoryStat.TotalCache +
+			metricsEntry.Metrics.MemoryStat.TotalSwap
 		containers = append(
 			containers,
 			Container{
