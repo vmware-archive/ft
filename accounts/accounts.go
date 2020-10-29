@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/c2h5oh/datasize"
 	"github.com/concourse/concourse/atc/db"
@@ -115,6 +116,7 @@ func printSamples(writer io.Writer, samples []Sample) error {
 			ui.TableCell{Contents: strings.Join(workloads, ",")},
 			ui.TableCell{Contents: string(sample.Labels.Type)},
 			ui.TableCell{Contents: humanReadable(sample.Container.Stats.Memory)},
+			ui.TableCell{Contents: sample.Container.Stats.Age.String()},
 			ui.TableCell{Contents: sample.Container.Handle},
 		})
 	}
@@ -130,6 +132,10 @@ func printSamples(writer io.Writer, samples []Sample) error {
 			},
 			ui.TableCell{
 				Contents: "memory",
+				Color:    color.New(color.Bold),
+			},
+			ui.TableCell{
+				Contents: "age",
 				Color:    color.New(color.Bold),
 			},
 			ui.TableCell{
@@ -169,6 +175,7 @@ type Container struct {
 
 type Stats struct {
 	Memory uint64
+	Age    time.Duration
 }
 
 // a Workload is a description of a concourse core concept that corresponds to

@@ -54,7 +54,10 @@ func (gw *GardenWorker) Containers(opts ...StatsOption) ([]Container, error) {
 			containers,
 			Container{
 				Handle: handle,
-				Stats:  Stats{Memory: memory},
+				Stats: Stats{
+					Memory: memory,
+					Age:    metricsEntry.Metrics.Age,
+				},
 			},
 		)
 	}
