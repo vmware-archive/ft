@@ -67,7 +67,9 @@ func (s *LANWorkerSuite) TestLANWorkerGetsMemory() {
 		"container-handle": garden.ContainerMetricsEntry{
 			Metrics: garden.Metrics{
 				MemoryStat: garden.ContainerMemoryStat{
-					TotalUsageTowardLimit: 123,
+					TotalRss:   10,
+					TotalCache: 20,
+					TotalSwap:  30,
 				},
 			},
 			Err: nil,
@@ -82,7 +84,7 @@ func (s *LANWorkerSuite) TestLANWorkerGetsMemory() {
 	s.NoError(err)
 	s.Len(containers, 1)
 	s.Equal(containers[0].Handle, "container-handle")
-	s.Equal(uint64(123), containers[0].Stats.Memory)
+	s.Equal(uint64(60), containers[0].Stats.Memory)
 }
 
 type K8sGardenDialerSuite struct {
